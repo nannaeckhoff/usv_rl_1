@@ -78,7 +78,7 @@ for i, (gx, gy) in enumerate(unique_goals, start=1):
 
 ax.set_xlabel("x")
 ax.set_ylabel("y")
-ax.set_title("Trained policy trajectory (SafetyPointGoal0-v0)")
+ax.set_title(f"Trained policy trajectory ({config.ENV_ID})")
 ax.legend()
 ax.set_aspect("equal")
 fig2.savefig(os.path.join(results_dir, "trained_trajectory.png"), dpi=120)

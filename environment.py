@@ -1,39 +1,264 @@
-# Defines make_env(): builds and returns a configured environment based on
-# config.py. Single source of truth for how the environment is constructed.
+# GPU-batched PointToGoal environment (see "project description/gpu_point_environment.md"
+# for the design rationale behind replacing Safety Gym/MuJoCo with this).
 #
-# Two variants are needed:
-# - for_training=False (default): uses safety_gymnasium.make(), which returns
-#   6 values per step (obs, reward, cost, terminated, truncated, info).
-# - for_training=True: uses gymnasium.make() on the "...Gymnasium-v0"
-#   variant, which returns the standard 5 values -- required by
-#   stable-baselines3.
+# All state is stored in tensors with a leading batch dimension N, so there
+# is no Python loop over environments -- one call to step() advances every
+# environment at once, on the GPU if available.
+#
+# The motion model is swappable (see unicycle_update / double_integrator_update
+# below), selected via the `dynamics` constructor argument:
+#   "unicycle"          -- nonholonomic, vehicle-like (default; closer to a
+#                           real USV -- it can only move along its heading
+#                           and must turn before moving sideways)
+#   "double_integrator"  -- omnidirectional point mass with drag
+#
+# Hazards are circular zones the agent should avoid. The cost is currently
+# one fixed formula (how far the agent has penetrated a hazard) -- reward
+# and cost are always returned separately and never combined here, so a
+# training loop is free to weight them however it wants.
+#
+# Interface mirrors Safety Gym but with tensors:
+#   reset()   -> obs
+#   step(a)   -> (obs, reward, cost, terminated, truncated, info)
+# terminated is true when the goal is reached (the episode ends there --
+# there's no more mid-episode goal respawn); truncated is true at the fixed
+# horizon. Either way the env is auto-reset via masks, so shapes stay fixed.
 
-import gymnasium
-import safety_gymnasium
-import config
+import math
 
-# Sentinel object used to detect "no render_mode argument was passed at
-# all", distinct from "render_mode=None was passed explicitly" (which
-# means "no rendering", and must NOT fall back to config.RENDER_MODE).
-_UNSET = object()
+import torch
 
 
-def make_env(render_mode=_UNSET, for_training: bool = False):
-    """Create and return the configured environment.
+def unicycle_update(pos, v, th, action, dt, k, c, w_max):
+    """Nonholonomic unicycle: thrust a1 and turn rate a2, both in [-1, 1].
+    pos: (N, 2), v: (N,), th: (N,) heading in radians. Forward-only thrust
+    (a1 mapped to [0, 1]) since a USV mainly drives forward."""
+    a1 = action[:, 0].clamp(-1.0, 1.0)
+    a2 = action[:, 1].clamp(-1.0, 1.0)
+    a1 = (a1 + 1.0) * 0.5
 
-    Args:
-        render_mode: "human" to open a live viewer window, None to run
-            headless (no window). If omitted entirely, falls back to
-            config.RENDER_MODE.
-        for_training: if True, returns the standard 5-value Gymnasium API
-            (for use with stable-baselines3). If False, returns the
-            safety-gymnasium 6-value API including the cost signal.
+    v = v + dt * (k * a1 - c * v)
+    th = th + dt * w_max * a2
+    th = (th + math.pi) % (2 * math.pi) - math.pi  # wrap to [-pi, pi)
+
+    heading = torch.stack([torch.cos(th), torch.sin(th)], dim=-1)
+    pos = pos + dt * v.unsqueeze(-1) * heading  # the whole "physics"
+    return pos, v, th
+
+
+def double_integrator_update(pos, vel, action, dt, c):
+    """Omnidirectional point mass with drag. action: (N, 2) force, no heading."""
+    a = action.clamp(-1.0, 1.0)
+    vel = vel + dt * (a - c * vel)
+    pos = pos + dt * vel
+    return pos, vel
+
+
+def min_hazard_distance(pos, hazards):
+    """Distance from the agent to the nearest hazard center. +inf when there
+    are no hazards (Stage A) -- `.min()` over an empty hazard dimension has
+    no defined value, unlike `.any()`, so that case is handled explicitly
+    here, once, instead of in every function that needs this distance."""
+    H = hazards.shape[1]
+    if H == 0:
+        return torch.full((pos.shape[0],), float("inf"), device=pos.device)
+    dist = (hazards - pos.unsqueeze(1)).norm(dim=-1)  # (N, H)
+    return dist.min(dim=1).values
+
+
+def compute_cost(pos, vel, heading, hazards, hazard_radius):
+    """The safety representation. Currently one fixed formula (penetration
+    depth), but takes the full (pos, vel, heading, hazards) signature so
+    velocity/direction-based cost terms can be added later without having
+    to change this signature everywhere it's called.
+
+    pos: (N, 2). vel: (N, 2), world-frame velocity (same meaning regardless
+    of dynamics -- v*[cos th, sin th] for the unicycle, vel directly for the
+    double integrator). heading: (N,) radians for the unicycle, None for the
+    double integrator (unused by this formula either way). hazards: (N, H, 2).
     """
-    mode = config.RENDER_MODE if render_mode is _UNSET else render_mode
+    min_dist = min_hazard_distance(pos, hazards)
+    depth = (hazard_radius - min_dist).clamp(min=0.0)  # +inf hazard distance -> depth 0
+    return depth / hazard_radius
 
-    if for_training:
-        env = gymnasium.make(config.ENV_ID_TRAINING, render_mode=mode)
-    else:
-        env = safety_gymnasium.make(config.ENV_ID, render_mode=mode)
 
-    return env
+class PointToGoal:
+    def __init__(self, N, dev="cuda", dt=0.1, horizon=1000,
+                 dynamics="unicycle", k=1.0, c=0.5, w_max=3.0,
+                 world_half_extent=5.0, goal_radius=0.3, goal_bonus=1.0,
+                 num_hazards=3, hazard_radius=0.5, placement_resample_rounds=10,
+                 randomize_start_pos=False, seed=0):
+        if dynamics not in ("unicycle", "double_integrator"):
+            raise ValueError(f"Unknown dynamics: {dynamics}")
+        if dev == "cuda" and not torch.cuda.is_available():
+            dev = "cpu"
+        self.N, self.dev, self.dt = N, dev, dt
+        self.horizon = horizon
+        self.dynamics = dynamics
+        self.k, self.c, self.w_max = k, c, w_max          # thrust gain, drag, max turn rate
+        self.world_half_extent = world_half_extent
+        self.goal_radius = goal_radius
+        self.goal_bonus = goal_bonus
+        self.H = num_hazards
+        self.hazard_radius = hazard_radius
+        self.placement_resample_rounds = placement_resample_rounds
+        self.randomize_start_pos = randomize_start_pos
+
+        # All randomness goes through this generator, so runs are reproducible.
+        self.gen = torch.Generator(device=self.dev)
+        self.gen.manual_seed(seed)
+
+        if dynamics == "unicycle":
+            # [v] + [goal_x, goal_y] (body frame) + [hazard_x, hazard_y] per hazard (body frame)
+            self.obs_dim = 1 + 2 + 2 * self.H
+        else:
+            # [vel_x, vel_y] + [goal_x, goal_y] + [hazard_x, hazard_y] per hazard (world frame -- no heading)
+            self.obs_dim = 2 + 2 + 2 * self.H
+        self.act_dim = 2  # unicycle: [thrust, turn rate]; double integrator: [ax, ay]
+
+        # State tensors are allocated in reset().
+        self.pos = None      # (N, 2)
+        self.v = None        # (N,)      unicycle only: forward speed
+        self.th = None       # (N,)      unicycle only: heading, radians
+        self.vel = None      # (N, 2)    double integrator only: velocity
+        self.goal = None     # (N, 2)
+        self.hazards = None  # (N, H, 2)
+        self.last_dist = None
+        self.t = None
+
+    def _rand_uniform(self, shape, low, high):
+        return torch.rand(shape, generator=self.gen, device=self.dev) * (high - low) + low
+
+    def _sample_positions(self, shape):
+        e = self.world_half_extent
+        return self._rand_uniform(shape, -e, e)
+
+    def _place_hazards(self):
+        """Sample hazard centers, resampling away from the start position
+        (the origin) for a fixed number of rounds -- not a guarantee, but
+        enough in practice with a reasonable world size / hazard count."""
+        shape = (self.N, self.H, 2)
+        keepout = self.hazard_radius + self.goal_radius
+        haz = self._sample_positions(shape)
+        for _ in range(self.placement_resample_rounds):
+            bad = haz.norm(dim=-1) < keepout  # (N, H), distance from origin
+            haz = torch.where(bad.unsqueeze(-1), self._sample_positions(shape), haz)
+        return haz
+
+    def _place_clear_point(self, hazards):
+        """Sample a single point per env, resampling away from all hazards.
+        Used for the goal, and for the start position when
+        randomize_start_pos is on -- both are "a point clear of hazards"."""
+        shape = (self.N, 2)
+        keepout = self.hazard_radius + self.goal_radius
+        point = self._sample_positions(shape)
+        for _ in range(self.placement_resample_rounds):
+            dist_to_hazards = (hazards - point.unsqueeze(1)).norm(dim=-1)  # (N, H)
+            bad = (dist_to_hazards < keepout).any(dim=1)
+            point = torch.where(bad.unsqueeze(-1), self._sample_positions(shape), point)
+        return point
+
+    def reset(self):
+        N, dev = self.N, self.dev
+        self.hazards = self._place_hazards()
+        self.pos = self._place_clear_point(self.hazards) if self.randomize_start_pos else torch.zeros(N, 2, device=dev)
+        if self.dynamics == "unicycle":
+            self.v = torch.zeros(N, device=dev)
+            self.th = self._rand_uniform((N,), -math.pi, math.pi)  # random initial heading
+        else:
+            self.vel = torch.zeros(N, 2, device=dev)
+        self.goal = self._place_clear_point(self.hazards)
+        self.last_dist = (self.goal - self.pos).norm(dim=-1)
+        self.t = torch.zeros(N, dtype=torch.long, device=dev)
+        return self._obs()
+
+    def _to_body_frame(self, world_vec, cos_th, sin_th):
+        """Rotate a world-frame vector (..., 2) into the agent's body frame
+        (by -th), so "ahead" is always the body-frame x-axis. cos_th/sin_th
+        must already be broadcastable against world_vec's leading dims."""
+        x, y = world_vec[..., 0], world_vec[..., 1]
+        bx = cos_th * x + sin_th * y
+        by = -sin_th * x + cos_th * y
+        return torch.stack([bx, by], dim=-1)
+
+    def _obs(self):
+        goal_rel = self.goal - self.pos                    # (N, 2)
+        hazards_rel = self.hazards - self.pos.unsqueeze(1)  # (N, H, 2)
+
+        if self.dynamics == "unicycle":
+            # Body-frame observation: the agent's absolute orientation in the
+            # world is meaningless to the policy once everything else is
+            # relative, so we rotate goal/hazards by -th and only keep speed
+            # (not cos/sin of the absolute heading).
+            cos_th, sin_th = torch.cos(self.th), torch.sin(self.th)
+            goal_obs = self._to_body_frame(goal_rel, cos_th, sin_th)
+            hazards_obs = self._to_body_frame(hazards_rel, cos_th.unsqueeze(-1), sin_th.unsqueeze(-1))
+            return torch.cat([self.v.unsqueeze(-1), goal_obs, hazards_obs.reshape(self.N, -1)], dim=-1)
+
+        # Double integrator has no heading, so there's no body frame to
+        # rotate into -- everything stays in world-frame coordinates.
+        return torch.cat([self.vel, goal_rel, hazards_rel.reshape(self.N, -1)], dim=-1)
+
+    @torch.no_grad()
+    def step(self, action):
+        if self.dynamics == "unicycle":
+            self.pos, self.v, self.th = unicycle_update(
+                self.pos, self.v, self.th, action, self.dt, self.k, self.c, self.w_max
+            )
+            heading = self.th
+            vel_world = self.v.unsqueeze(-1) * torch.stack([torch.cos(self.th), torch.sin(self.th)], dim=-1)
+        else:
+            self.pos, self.vel = double_integrator_update(self.pos, self.vel, action, self.dt, self.c)
+            heading = None
+            vel_world = self.vel
+
+        # Keep the agent inside the world -- goals/hazards are only ever
+        # placed in [-extent, extent], so nothing useful is out there anyway.
+        self.pos = torch.clamp(self.pos, -self.world_half_extent, self.world_half_extent)
+
+        # Reward: progress toward the goal, plus a bonus for reaching it.
+        # Reaching the goal now ends the episode (terminated) -- no more
+        # mid-episode respawn.
+        dist = (self.goal - self.pos).norm(dim=-1)
+        terminated = dist < self.goal_radius
+        reward = (self.last_dist - dist) + terminated.float() * self.goal_bonus
+
+        cost = compute_cost(self.pos, vel_world, heading, self.hazards, self.hazard_radius)
+        min_dist_to_hazard = min_hazard_distance(self.pos, self.hazards)
+        ref_in_hazard = min_dist_to_hazard < self.hazard_radius
+
+        self.t = self.t + 1
+        truncated = self.t >= self.horizon
+        episode_length = self.t  # length of the episode that just ended, for envs where terminated | truncated
+        done = terminated | truncated
+
+        info = {
+            "goal_reached": terminated,
+            "in_hazard": ref_in_hazard,
+            "min_hazard_dist": min_dist_to_hazard,
+            "episode_length": episode_length,
+            # The observation the agent would have seen next had the episode
+            # *not* been cut off here (before hazards/pos/goal get reset
+            # below) -- used to bootstrap correctly through a truncation
+            # instead of treating it like a real terminal state. Same idea
+            # as Gymnasium's `info["final_observation"]`.
+            "final_obs": self._obs(),
+        }
+
+        # Reset finished envs (terminated or truncated) with masks, so
+        # tensor shapes stay fixed regardless of how many are done.
+        done2 = done.unsqueeze(-1)
+        new_hazards = self._place_hazards()
+        self.hazards = torch.where(done.view(-1, 1, 1), new_hazards, self.hazards)
+        new_start_pos = self._place_clear_point(self.hazards) if self.randomize_start_pos else torch.zeros_like(self.pos)
+        self.pos = torch.where(done2, new_start_pos, self.pos)
+        if self.dynamics == "unicycle":
+            self.v = torch.where(done, torch.zeros_like(self.v), self.v)
+            self.th = torch.where(done, self._rand_uniform((self.N,), -math.pi, math.pi), self.th)
+        else:
+            self.vel = torch.where(done2, torch.zeros_like(self.vel), self.vel)
+        self.goal = torch.where(done2, self._place_clear_point(self.hazards), self.goal)
+        self.last_dist = (self.goal - self.pos).norm(dim=-1)
+        self.t = torch.where(done, torch.zeros_like(self.t), self.t)
+
+        return self._obs(), reward, cost, terminated, truncated, info
