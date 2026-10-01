@@ -57,7 +57,6 @@ HIDDEN_SIZE = 64
 LOG_STD_INIT = -0.5   # initial log standard deviation of the Gaussian policy
 
 # --- Logging / saving ---
-LOG_EVERY = 10                              # rounds between console logs
 SAVE_EVERY = 50                             # rounds between checkpoints
 MODEL_SAVE_PATH = "results/baseline.pt"
 

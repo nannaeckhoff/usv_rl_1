@@ -298,29 +298,6 @@ def train():
         metrics_writer.writerow(row)
         metrics_file.flush()
 
-        pbar.set_postfix({
-            "reward/step": f"{row['reward_per_step']:.3f}",
-            "success": f"{row['success_rate']:.2f}",
-            "steps/sec": f"{row['steps_per_sec']:.0f}",
-        })
-
-        if update % cfg.LOG_EVERY == 0 or update == cfg.TOTAL_UPDATES:
-            tqdm.write(
-                f"update {update}/{cfg.TOTAL_UPDATES}  "
-                f"lr={row['lr']:.2e}  "
-                f"reward/step={row['reward_per_step']:.3f}  "
-                f"cost/step={row['cost_per_step']:.3f}  "
-                f"violation_rate={row['violation_rate']:.3f}  "
-                f"success_rate={row['success_rate']:.2f}  "
-                f"mean_ep_len={row['mean_episode_length']:.1f}  "
-                f"steps/sec={row['steps_per_sec']:.0f}  "
-                f"policy_loss={row['policy_loss']:.4f}  "
-                f"value_loss={row['value_loss']:.4f}  "
-                f"entropy={row['entropy']:.4f}  "
-                f"approx_kl={row['approx_kl']:.4f}  "
-                f"clip_frac={row['clip_frac']:.3f}"
-            )
-
         if update % cfg.SAVE_EVERY == 0 or update == cfg.TOTAL_UPDATES:
             torch.save({
                 "model": net.state_dict(),
