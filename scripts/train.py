@@ -5,6 +5,15 @@
 # library. All hyperparameters come from config.py. Environment, network
 # and update all stay on the GPU; the only CPU syncs are the scalars
 # printed/logged once per round.
+#
+# Run: python scripts/train.py [--preset stage_a] [--seeds 1 2 3 4 5]
+#   no --preset  -- trains with the constants as they currently stand in
+#                   config.py (single run, config.SEED)
+#   --preset     -- overwrite those constants with a named preset from
+#                   config.PRESETS first (e.g. stage_a, stage_b)
+#   --seeds      -- train once per seed instead of a single config.SEED run;
+#                   each seed gets its own checkpoint/metrics.csv, and a
+#                   mean +/- std summary is printed across seeds at the end
 
 import csv
 import sys

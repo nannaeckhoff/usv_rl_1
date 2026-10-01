@@ -1,5 +1,4 @@
-# GPU-batched PointToGoal environment (see "project description/gpu_point_environment.md"
-# for the design rationale behind replacing Safety Gym/MuJoCo with this).
+# GPU-batched PointToGoal environmen, replacing Safety Gym/MuJoCo 
 #
 # All state is stored in tensors with a leading batch dimension N, so there
 # is no Python loop over environments -- one call to step() advances every

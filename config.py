@@ -2,6 +2,8 @@
 # (environment.py / scripts/train.py). No logic here, only values. The
 # legacy Safety-Gym/MuJoCo pipeline this replaced now lives under legacy/.
 
+import os
+
 import torch
 
 # --- Device ---
@@ -57,7 +59,7 @@ LOG_STD_INIT = -0.5   # initial log standard deviation of the Gaussian policy
 # --- Logging / saving ---
 LOG_EVERY = 10                              # rounds between console logs
 SAVE_EVERY = 50                             # rounds between checkpoints
-MODEL_SAVE_PATH = "results/ppo_baseline.pt"
+MODEL_SAVE_PATH = "results/baseline.pt"
 
 # --- Task 1 baseline-stage presets ---
 # Select one by name (e.g. `apply_preset("stage_a")`, or `--preset stage_a`
@@ -76,8 +78,11 @@ PRESETS = {
 
 def apply_preset(name):
     """Overwrite the matching module-level constants with the preset's
-    values. Call right after `import config`, before anything else reads
+    values, and namespace MODEL_SAVE_PATH under results/<name>/ so stage_a,
+    stage_b, etc. never collide or save under the generic default by
+    accident. Call right after `import config`, before anything else reads
     the constants (e.g. before building the environment)."""
     if name not in PRESETS:
         raise ValueError(f"Unknown preset: {name!r}. Options: {list(PRESETS)}")
     globals().update(PRESETS[name])
+    globals()["MODEL_SAVE_PATH"] = os.path.join("results", name, os.path.basename(MODEL_SAVE_PATH))
