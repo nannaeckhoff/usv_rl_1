@@ -25,15 +25,28 @@ import math
 import torch
 
 
-def unicycle_update(pos, v, th, action, dt, k, c, w_max):
+def unicycle_update(pos, v, th, action, dt, k, c, w_max, v_max, thrust_mode):
     """Nonholonomic unicycle: thrust a1 and turn rate a2, both in [-1, 1].
-    pos: (N, 2), v: (N,), th: (N,) heading in radians. Forward-only thrust
-    (a1 mapped to [0, 1]) since a USV mainly drives forward."""
+    pos: (N, 2), v: (N,), th: (N,) heading in radians.
+
+    thrust_mode selects how a1 is interpreted:
+      "forward_only": a1 mapped to [0, 1] -- can only ever speed up or coast,
+        matches a USV that mainly drives forward (the original behaviour).
+      "bidirectional": a1 used as-is in [-1, 1] -- negative a1 actively
+        brakes/reverses thrust, needed since with c = 0 (no drag) there is
+        otherwise nothing that ever slows the boat down.
+
+    v is always clamped to [0, v_max] after the update: with c = 0 the drag
+    term no longer bounds speed on its own, so the clamp is what takes over
+    that job. v_max = inf reproduces the old, unclamped behaviour.
+    """
     a1 = action[:, 0].clamp(-1.0, 1.0)
     a2 = action[:, 1].clamp(-1.0, 1.0)
-    a1 = (a1 + 1.0) * 0.5
+    if thrust_mode == "forward_only":
+        a1 = (a1 + 1.0) * 0.5
 
     v = v + dt * (k * a1 - c * v)
+    v = v.clamp(min=0.0, max=v_max)
     th = th + dt * w_max * a2
     th = (th + math.pi) % (2 * math.pi) - math.pi  # wrap to [-pi, pi)
 
@@ -70,15 +83,19 @@ def compute_cost(pos, vel, heading, hazards, hazard_radius):
 
 class PointToGoal:
     def __init__(self, N, dev="cuda", dt=0.1, horizon=1000,
-                 k=1.0, c=0.5, w_max=3.0,
+                 k=1.0, c=0.0, w_max=1.0, v_max=1.0, thrust_mode="bidirectional",
                  world_half_extent=5.0, goal_radius=0.3, goal_bonus=1.0,
                  num_hazards=3, hazard_radius=0.5, placement_resample_rounds=10,
                  randomize_start_pos=False, seed=0):
         if dev == "cuda" and not torch.cuda.is_available():
             dev = "cpu"
+        if thrust_mode not in ("bidirectional", "forward_only"):
+            raise ValueError(f"thrust_mode must be 'bidirectional' or 'forward_only', got {thrust_mode!r}")
         self.N, self.dev, self.dt = N, dev, dt
         self.horizon = horizon
         self.k, self.c, self.w_max = k, c, w_max          # thrust gain, drag, max turn rate
+        self.v_max = float("inf") if v_max is None else v_max
+        self.thrust_mode = thrust_mode
         self.world_half_extent = world_half_extent
         self.goal_radius = goal_radius
         self.goal_bonus = goal_bonus
@@ -172,7 +189,8 @@ class PointToGoal:
     @torch.no_grad()
     def step(self, action):
         self.pos, self.v, self.th = unicycle_update(
-            self.pos, self.v, self.th, action, self.dt, self.k, self.c, self.w_max
+            self.pos, self.v, self.th, action, self.dt, self.k, self.c, self.w_max,
+            self.v_max, self.thrust_mode,
         )
         heading = self.th
         vel_world = self.v.unsqueeze(-1) * torch.stack([torch.cos(self.th), torch.sin(self.th)], dim=-1)

@@ -130,7 +130,7 @@ def train():
 
     env = PointToGoal(
         N=cfg.N_ENVS, dev=cfg.DEVICE, dt=cfg.DT, horizon=cfg.HORIZON,
-        k=cfg.K_THRUST, c=cfg.DRAG_COEF, w_max=cfg.W_MAX,
+        k=cfg.K_THRUST, c=cfg.DRAG_COEF, w_max=cfg.W_MAX, v_max=cfg.V_MAX, thrust_mode=cfg.THRUST_MODE,
         world_half_extent=cfg.WORLD_HALF_EXTENT, goal_radius=cfg.GOAL_RADIUS, goal_bonus=cfg.GOAL_BONUS,
         num_hazards=cfg.NUM_HAZARDS, hazard_radius=cfg.HAZARD_RADIUS,
         placement_resample_rounds=cfg.PLACEMENT_RESAMPLE_ROUNDS,
@@ -304,6 +304,15 @@ def train():
                 "obs_rms_mean": obs_rms.mean,
                 "obs_rms_var": obs_rms.var,
                 "obs_rms_count": obs_rms.count,
+                # Which motion model this run used -- config.py's defaults
+                # change over time, so without this a later run of plot.py
+                # would silently evaluate the checkpoint under whatever
+                # dynamics happen to be in config.py *then*, not the ones
+                # it was actually trained under.
+                "dynamics": {
+                    "dt": cfg.DT, "k": cfg.K_THRUST, "c": cfg.DRAG_COEF,
+                    "w_max": cfg.W_MAX, "v_max": cfg.V_MAX, "thrust_mode": cfg.THRUST_MODE,
+                },
             }, cfg.MODEL_SAVE_PATH)
 
     metrics_file.close()

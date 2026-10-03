@@ -137,7 +137,7 @@ def plot_ppo_diagnostics(metrics_path, out_path):
 def plot_trajectory(checkpoint_path, out_path):
     env = PointToGoal(
         N=1, dev="cpu", dt=cfg.DT, horizon=cfg.HORIZON,
-        k=cfg.K_THRUST, c=cfg.DRAG_COEF, w_max=cfg.W_MAX,
+        k=cfg.K_THRUST, c=cfg.DRAG_COEF, w_max=cfg.W_MAX, v_max=cfg.V_MAX, thrust_mode=cfg.THRUST_MODE,
         world_half_extent=cfg.WORLD_HALF_EXTENT, goal_radius=cfg.GOAL_RADIUS, goal_bonus=cfg.GOAL_BONUS,
         num_hazards=cfg.NUM_HAZARDS, hazard_radius=cfg.HAZARD_RADIUS,
         placement_resample_rounds=cfg.PLACEMENT_RESAMPLE_ROUNDS,

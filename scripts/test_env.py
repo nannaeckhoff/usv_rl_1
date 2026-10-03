@@ -49,7 +49,8 @@ def check_unicycle_straight_line():
 
 def check_unicycle_circle():
     print("[1b] unicycle: thrust + constant turn -> circular path ...", end=" ")
-    env = PointToGoal(N=4, dev="cpu", horizon=500, num_hazards=0, k=1.0, c=0.5, w_max=1.0, seed=1)
+    env = PointToGoal(N=4, dev="cpu", horizon=500, num_hazards=0, k=1.0, c=0.5, w_max=1.0,
+                       v_max=float("inf"), thrust_mode="forward_only", seed=1)
     env.reset()
     _push_goal_far_away(env)
     env.th = torch.zeros(4)
@@ -75,6 +76,51 @@ def check_unicycle_circle():
     center_std = centers.std(dim=0).mean().item()
     print(f"(radius~{radius:.2f}, center std={center_std:.4f}) ", end="")
     assert center_std < 0.05 * radius, "candidate circle centers should stay ~constant along a real circle"
+    print("OK")
+
+
+def check_speed_clamp_and_braking():
+    print("[1c] speed: clamp, braking, coasting, old-model equilibrium ...", end=" ")
+    N = 4
+    full_thrust = torch.tensor([[1.0, 0.0]]).repeat(N, 1)
+    full_brake = torch.tensor([[-1.0, 0.0]]).repeat(N, 1)
+    zero_thrust = torch.tensor([[0.0, 0.0]]).repeat(N, 1)
+
+    # Default (minimal) model: k=1, c=0, v_max=1, thrust_mode="bidirectional".
+    env = PointToGoal(N=N, dev="cpu", horizon=200, num_hazards=0, seed=2)
+    env.reset()
+    _push_goal_far_away(env)
+
+    env.v = torch.zeros(N)
+    for _ in range(50):
+        env.step(full_thrust)
+    assert torch.allclose(env.v, torch.full((N,), env.v_max), atol=1e-6), \
+        "full throttle from rest should drive v to v_max and hold it there"
+
+    env.v = torch.full((N,), env.v_max)
+    for _ in range(50):
+        env.step(full_brake)
+        assert (env.v >= 0.0).all(), "v must never go negative"
+    assert torch.allclose(env.v, torch.zeros(N), atol=1e-6), "full brake from v_max should bring v to exactly 0"
+
+    env.v = torch.full((N,), 0.4)
+    coast_v = env.v.clone()
+    for _ in range(20):
+        env.step(zero_thrust)
+    assert torch.allclose(env.v, coast_v, atol=1e-6), "zero thrust should neither speed up nor slow down (c=0)"
+
+    # Old model reproduced via config: c > 0, thrust_mode="forward_only", v_max=inf.
+    # Speed should converge to the drag equilibrium k/c instead of any hard clamp.
+    k, c = 1.0, 0.5
+    env_old = PointToGoal(N=N, dev="cpu", horizon=1000, num_hazards=0, k=k, c=c, w_max=1.0,
+                           v_max=float("inf"), thrust_mode="forward_only", seed=3)
+    env_old.reset()
+    _push_goal_far_away(env_old)
+    env_old.v = torch.zeros(N)
+    for _ in range(300):
+        env_old.step(full_thrust)
+    assert torch.allclose(env_old.v, torch.full((N,), k / c), atol=1e-3), \
+        "old-model full throttle should converge to the k/c drag equilibrium, not clamp"
     print("OK")
 
 
@@ -122,7 +168,7 @@ def run_policy(env, action_fn, steps):
 def _build_stage_a_env(N, seed):
     return PointToGoal(
         N=N, dev="cpu", horizon=cfg.HORIZON,
-        k=cfg.K_THRUST, c=cfg.DRAG_COEF, w_max=cfg.W_MAX,
+        k=cfg.K_THRUST, c=cfg.DRAG_COEF, w_max=cfg.W_MAX, v_max=cfg.V_MAX, thrust_mode=cfg.THRUST_MODE,
         world_half_extent=cfg.WORLD_HALF_EXTENT, goal_radius=cfg.GOAL_RADIUS, goal_bonus=cfg.GOAL_BONUS,
         num_hazards=cfg.NUM_HAZARDS, hazard_radius=cfg.HAZARD_RADIUS, seed=seed,
     )
@@ -153,6 +199,7 @@ def check_heuristic_beats_random_on_stage_a():
 if __name__ == "__main__":
     check_unicycle_straight_line()
     check_unicycle_circle()
+    check_speed_clamp_and_braking()
     check_seeding_reproducible()
     check_heuristic_beats_random_on_stage_a()
     print("\nAll checks passed.")
