@@ -107,7 +107,7 @@ def main():
         ax.legend(loc="best", fontsize=8)
     axes[1].set_ylim(-0.05, 1.05)
     axes[-1].set_xlabel("Env steps")
-    axes[0].set_title(f"Across-seed training curves ({cfg.DYNAMICS}, {len(seeds)} seeds: {seeds})")
+    axes[0].set_title(f"Across-seed training curves ({len(seeds)} seeds: {seeds})")
 
     fig.tight_layout()
     out_path = args.out or os.path.join(os.path.dirname(cfg.MODEL_SAVE_PATH) or ".", "baseline_seeds.png")

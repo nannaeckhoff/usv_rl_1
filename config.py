@@ -17,9 +17,7 @@ N_ENVS = 4096      # number of parallel environments simulated at once
 DT = 0.1           # simulation timestep
 HORIZON = 1000     # steps per episode before it resets
 
-DYNAMICS = "unicycle"  # "unicycle" (default) or "double_integrator"
-
-# Motion model constants (K_THRUST, W_MAX only apply to the unicycle).
+# Unicycle motion model constants.
 K_THRUST = 1.0   # k: how strongly thrust increases speed
 DRAG_COEF = 0.5  # c: how strongly drag decreases speed
 W_MAX = 3.0      # max turn rate, rad/s
@@ -66,11 +64,9 @@ MODEL_SAVE_PATH = "results/baseline.pt"
 PRESETS = {
     "stage_a": {  # goal only, no hazards -- the baseline navigation task
         "NUM_HAZARDS": 0,
-        "DYNAMICS": "unicycle",
     },
     "stage_b": {  # one static hazard introduced
         "NUM_HAZARDS": 1,
-        "DYNAMICS": "unicycle",
     },
 }
 

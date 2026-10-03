@@ -25,7 +25,7 @@ from matplotlib.patches import Circle
 import config as cfg
 from environment import PointToGoal
 from train import ActorCritic, RunningMeanStd
-from test_env import _build_stage_a_env as _build_eval_env, run_policy, unicycle_heuristic_action, double_integrator_heuristic_action
+from test_env import _build_stage_a_env as _build_eval_env, run_policy, unicycle_heuristic_action
 
 
 def parse_args():
@@ -42,12 +42,11 @@ def compute_reference_baselines():
     cfg (whatever preset is active), so the reference lines are always
     correct for what was actually trained -- never hardcoded numbers."""
     N, steps = 300, cfg.HORIZON
-    action_fn = unicycle_heuristic_action if cfg.DYNAMICS == "unicycle" else double_integrator_heuristic_action
 
-    env_h = _build_eval_env(N, cfg.DYNAMICS, seed=10)
-    reward_h, _, _ = run_policy(env_h, action_fn, steps)
+    env_h = _build_eval_env(N, seed=10)
+    reward_h, _, _ = run_policy(env_h, unicycle_heuristic_action, steps)
 
-    env_r = _build_eval_env(N, cfg.DYNAMICS, seed=10)
+    env_r = _build_eval_env(N, seed=10)
     torch.manual_seed(0)
     reward_r, _, _ = run_policy(env_r, lambda obs: torch.rand(N, env_r.act_dim) * 2 - 1, steps)
 
@@ -138,7 +137,7 @@ def plot_ppo_diagnostics(metrics_path, out_path):
 def plot_trajectory(checkpoint_path, out_path):
     env = PointToGoal(
         N=1, dev="cpu", dt=cfg.DT, horizon=cfg.HORIZON,
-        dynamics=cfg.DYNAMICS, k=cfg.K_THRUST, c=cfg.DRAG_COEF, w_max=cfg.W_MAX,
+        k=cfg.K_THRUST, c=cfg.DRAG_COEF, w_max=cfg.W_MAX,
         world_half_extent=cfg.WORLD_HALF_EXTENT, goal_radius=cfg.GOAL_RADIUS, goal_bonus=cfg.GOAL_BONUS,
         num_hazards=cfg.NUM_HAZARDS, hazard_radius=cfg.HAZARD_RADIUS,
         placement_resample_rounds=cfg.PLACEMENT_RESAMPLE_ROUNDS,
@@ -158,11 +157,9 @@ def plot_trajectory(checkpoint_path, out_path):
     obs_rms.var = checkpoint["obs_rms_var"]
     obs_rms.count = checkpoint["obs_rms_count"]
 
-    is_unicycle = cfg.DYNAMICS == "unicycle"
-
     raw_obs = env.reset()
     positions = [env.pos[0].numpy().copy()]
-    headings = [env.th[0].item()] if is_unicycle else None
+    headings = [env.th[0].item()]
     goals = [env.goal[0].numpy().copy()]
     hazards = env.hazards[0].numpy().copy()
     success = False
@@ -176,12 +173,11 @@ def plot_trajectory(checkpoint_path, out_path):
                 success = bool(terminated[0].item())
                 break  # env has already been reset internally -- don't plot that frame
             positions.append(env.pos[0].numpy().copy())
-            if is_unicycle:
-                headings.append(env.th[0].item())
+            headings.append(env.th[0].item())
             goals.append(env.goal[0].numpy().copy())
 
     positions = np.array(positions)
-    headings = np.array(headings) if headings is not None else None
+    headings = np.array(headings)
     goals = np.array(goals)
 
     unique_goals = [goals[0]]
@@ -197,16 +193,15 @@ def plot_trajectory(checkpoint_path, out_path):
     ax.plot(positions[0, 0], positions[0, 1], "go", markersize=8, label="Start")
     ax.plot(unique_goals[:, 0], unique_goals[:, 1], "g*", markersize=15, label="Goal(s)")
 
-    if headings is not None:
-        step = max(1, len(positions) // 30)
-        arrow_len = 0.2
-        for i in range(0, len(positions) - 1, step):
-            dx, dy = np.cos(headings[i]) * arrow_len, np.sin(headings[i]) * arrow_len
-            ax.arrow(positions[i, 0], positions[i, 1], dx, dy, head_width=0.08, color="black", alpha=0.6)
+    step = max(1, len(positions) // 30)
+    arrow_len = 0.2
+    for i in range(0, len(positions) - 1, step):
+        dx, dy = np.cos(headings[i]) * arrow_len, np.sin(headings[i]) * arrow_len
+        ax.arrow(positions[i, 0], positions[i, 1], dx, dy, head_width=0.08, color="black", alpha=0.6)
 
     ax.set_xlabel("x")
     ax.set_ylabel("y")
-    ax.set_title(f"Trained policy ({cfg.DYNAMICS}) -- {'reached goal' if success else 'timed out'}")
+    ax.set_title(f"Trained policy -- {'reached goal' if success else 'timed out'}")
     ax.set_aspect("equal")
     ax.legend(loc="best")
 

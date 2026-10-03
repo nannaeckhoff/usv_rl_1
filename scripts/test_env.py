@@ -5,12 +5,10 @@
 # Checks:
 #   1. Unicycle dynamics: thrust + zero turn -> straight line;
 #      thrust + constant turn -> circular path
-#   2. Double integrator dynamics: velocity converges toward a/c
-#   3. Same seed -> identical reset()/step() trajectory
-#   4. A heuristic controller (turn to face the goal, then thrust) beats a
+#   2. Same seed -> identical reset()/step() trajectory
+#   3. A heuristic controller (turn to face the goal, then thrust) beats a
 #      random policy on Stage A, actually reaches goals, and costs exactly 0
 #      (no hazards on Stage A)
-#   5. The double-integrator swap runs end-to-end with its own heuristic
 
 import sys
 import os
@@ -80,25 +78,8 @@ def check_unicycle_circle():
     print("OK")
 
 
-def check_double_integrator_velocity():
-    print("[2] double integrator: velocity -> a/c ...", end=" ")
-    env = PointToGoal(N=4, dev="cpu", dynamics="double_integrator", horizon=1000, num_hazards=0, c=0.5, seed=2)
-    env.reset()
-    _push_goal_far_away(env)
-
-    action = torch.tensor([[1.0, 0.0]]).repeat(4, 1)
-    for _ in range(500):
-        env.step(action)
-
-    expected = 1.0 / env.c
-    got = env.vel[0, 0].item()
-    print(f"(expected~{expected:.2f}, got={got:.2f}) ", end="")
-    assert abs(got - expected) < 0.02, "velocity should converge to a/c"
-    print("OK")
-
-
 def check_seeding_reproducible():
-    print("[3] same seed -> identical trajectory ...", end=" ")
+    print("[2] same seed -> identical trajectory ...", end=" ")
 
     def run():
         env = PointToGoal(N=16, dev="cpu", horizon=50, num_hazards=2, seed=123)
@@ -124,12 +105,6 @@ def unicycle_heuristic_action(obs):
     return torch.stack([thrust, turn], dim=-1)
 
 
-def double_integrator_heuristic_action(obs):
-    """Thrust straight at the goal. Obs layout: [vel_x, vel_y, goal_x, goal_y, hazards...]."""
-    goal = obs[:, 2:4]
-    return goal / (goal.norm(dim=-1, keepdim=True) + 1e-6)
-
-
 def run_policy(env, action_fn, steps):
     obs = env.reset()
     total_reward = torch.zeros(env.N)
@@ -144,9 +119,9 @@ def run_policy(env, action_fn, steps):
     return total_reward, total_cost, ever_reached
 
 
-def _build_stage_a_env(N, dynamics, seed):
+def _build_stage_a_env(N, seed):
     return PointToGoal(
-        N=N, dev="cpu", dynamics=dynamics, horizon=cfg.HORIZON,
+        N=N, dev="cpu", horizon=cfg.HORIZON,
         k=cfg.K_THRUST, c=cfg.DRAG_COEF, w_max=cfg.W_MAX,
         world_half_extent=cfg.WORLD_HALF_EXTENT, goal_radius=cfg.GOAL_RADIUS, goal_bonus=cfg.GOAL_BONUS,
         num_hazards=cfg.NUM_HAZARDS, hazard_radius=cfg.HAZARD_RADIUS, seed=seed,
@@ -154,14 +129,14 @@ def _build_stage_a_env(N, dynamics, seed):
 
 
 def check_heuristic_beats_random_on_stage_a():
-    print("[4] heuristic vs. random on Stage A ...")
+    print("[3] heuristic vs. random on Stage A ...")
     cfg.apply_preset("stage_a")
     N, steps = 300, cfg.HORIZON
 
-    env_h = _build_stage_a_env(N, "unicycle", seed=10)
+    env_h = _build_stage_a_env(N, seed=10)
     reward_h, cost_h, reached_h = run_policy(env_h, unicycle_heuristic_action, steps)
 
-    env_r = _build_stage_a_env(N, "unicycle", seed=10)  # same seed -> same scenarios, fair comparison
+    env_r = _build_stage_a_env(N, seed=10)  # same seed -> same scenarios, fair comparison
     torch.manual_seed(0)
     reward_r, cost_r, reached_r = run_policy(env_r, lambda obs: torch.rand(N, 2) * 2 - 1, steps)
 
@@ -175,21 +150,9 @@ def check_heuristic_beats_random_on_stage_a():
     print("    OK")
 
 
-def check_double_integrator_swap():
-    print("[5] double-integrator swap runs end-to-end ...", end=" ")
-    cfg.apply_preset("stage_a")
-    env = _build_stage_a_env(100, "double_integrator", seed=11)
-    reward, cost, reached = run_policy(env, double_integrator_heuristic_action, cfg.HORIZON)
-    print(f"(success_rate={reached.float().mean():.2f}) ", end="")
-    assert reached.float().mean() > 0.3, "double-integrator heuristic should reach the goal reasonably often"
-    print("OK")
-
-
 if __name__ == "__main__":
     check_unicycle_straight_line()
     check_unicycle_circle()
-    check_double_integrator_velocity()
     check_seeding_reproducible()
     check_heuristic_beats_random_on_stage_a()
-    check_double_integrator_swap()
     print("\nAll checks passed.")

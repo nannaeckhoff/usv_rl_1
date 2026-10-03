@@ -130,7 +130,7 @@ def train():
 
     env = PointToGoal(
         N=cfg.N_ENVS, dev=cfg.DEVICE, dt=cfg.DT, horizon=cfg.HORIZON,
-        dynamics=cfg.DYNAMICS, k=cfg.K_THRUST, c=cfg.DRAG_COEF, w_max=cfg.W_MAX,
+        k=cfg.K_THRUST, c=cfg.DRAG_COEF, w_max=cfg.W_MAX,
         world_half_extent=cfg.WORLD_HALF_EXTENT, goal_radius=cfg.GOAL_RADIUS, goal_bonus=cfg.GOAL_BONUS,
         num_hazards=cfg.NUM_HAZARDS, hazard_radius=cfg.HAZARD_RADIUS,
         placement_resample_rounds=cfg.PLACEMENT_RESAMPLE_ROUNDS,

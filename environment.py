@@ -4,12 +4,9 @@
 # is no Python loop over environments -- one call to step() advances every
 # environment at once, on the GPU if available.
 #
-# The motion model is swappable (see unicycle_update / double_integrator_update
-# below), selected via the `dynamics` constructor argument:
-#   "unicycle"          -- nonholonomic, vehicle-like (default; closer to a
-#                           real USV -- it can only move along its heading
-#                           and must turn before moving sideways)
-#   "double_integrator"  -- omnidirectional point mass with drag
+# Motion model: unicycle (see unicycle_update below) -- nonholonomic,
+# vehicle-like, closer to a real USV: it can only move along its heading
+# and must turn before moving sideways.
 #
 # Hazards are circular zones the agent should avoid. The cost is currently
 # one fixed formula (how far the agent has penetrated a hazard) -- reward
@@ -45,14 +42,6 @@ def unicycle_update(pos, v, th, action, dt, k, c, w_max):
     return pos, v, th
 
 
-def double_integrator_update(pos, vel, action, dt, c):
-    """Omnidirectional point mass with drag. action: (N, 2) force, no heading."""
-    a = action.clamp(-1.0, 1.0)
-    vel = vel + dt * (a - c * vel)
-    pos = pos + dt * vel
-    return pos, vel
-
-
 def min_hazard_distance(pos, hazards):
     """Distance from the agent to the nearest hazard center. +inf when there
     are no hazards (Stage A) -- `.min()` over an empty hazard dimension has
@@ -71,10 +60,8 @@ def compute_cost(pos, vel, heading, hazards, hazard_radius):
     velocity/direction-based cost terms can be added later without having
     to change this signature everywhere it's called.
 
-    pos: (N, 2). vel: (N, 2), world-frame velocity (same meaning regardless
-    of dynamics -- v*[cos th, sin th] for the unicycle, vel directly for the
-    double integrator). heading: (N,) radians for the unicycle, None for the
-    double integrator (unused by this formula either way). hazards: (N, H, 2).
+    pos: (N, 2). vel: (N, 2), world-frame velocity (v*[cos th, sin th]).
+    heading: (N,) radians (unused by this formula). hazards: (N, H, 2).
     """
     min_dist = min_hazard_distance(pos, hazards)
     depth = (hazard_radius - min_dist).clamp(min=0.0)  # +inf hazard distance -> depth 0
@@ -83,17 +70,14 @@ def compute_cost(pos, vel, heading, hazards, hazard_radius):
 
 class PointToGoal:
     def __init__(self, N, dev="cuda", dt=0.1, horizon=1000,
-                 dynamics="unicycle", k=1.0, c=0.5, w_max=3.0,
+                 k=1.0, c=0.5, w_max=3.0,
                  world_half_extent=5.0, goal_radius=0.3, goal_bonus=1.0,
                  num_hazards=3, hazard_radius=0.5, placement_resample_rounds=10,
                  randomize_start_pos=False, seed=0):
-        if dynamics not in ("unicycle", "double_integrator"):
-            raise ValueError(f"Unknown dynamics: {dynamics}")
         if dev == "cuda" and not torch.cuda.is_available():
             dev = "cpu"
         self.N, self.dev, self.dt = N, dev, dt
         self.horizon = horizon
-        self.dynamics = dynamics
         self.k, self.c, self.w_max = k, c, w_max          # thrust gain, drag, max turn rate
         self.world_half_extent = world_half_extent
         self.goal_radius = goal_radius
@@ -107,19 +91,14 @@ class PointToGoal:
         self.gen = torch.Generator(device=self.dev)
         self.gen.manual_seed(seed)
 
-        if dynamics == "unicycle":
-            # [v] + [goal_x, goal_y] (body frame) + [hazard_x, hazard_y] per hazard (body frame)
-            self.obs_dim = 1 + 2 + 2 * self.H
-        else:
-            # [vel_x, vel_y] + [goal_x, goal_y] + [hazard_x, hazard_y] per hazard (world frame -- no heading)
-            self.obs_dim = 2 + 2 + 2 * self.H
-        self.act_dim = 2  # unicycle: [thrust, turn rate]; double integrator: [ax, ay]
+        # [v] + [goal_x, goal_y] (body frame) + [hazard_x, hazard_y] per hazard (body frame)
+        self.obs_dim = 1 + 2 + 2 * self.H
+        self.act_dim = 2  # [thrust, turn rate]
 
         # State tensors are allocated in reset().
         self.pos = None      # (N, 2)
-        self.v = None        # (N,)      unicycle only: forward speed
-        self.th = None       # (N,)      unicycle only: heading, radians
-        self.vel = None      # (N, 2)    double integrator only: velocity
+        self.v = None        # (N,)      forward speed
+        self.th = None       # (N,)      heading, radians
         self.goal = None     # (N, 2)
         self.hazards = None  # (N, H, 2)
         self.last_dist = None
@@ -161,11 +140,8 @@ class PointToGoal:
         N, dev = self.N, self.dev
         self.hazards = self._place_hazards()
         self.pos = self._place_clear_point(self.hazards) if self.randomize_start_pos else torch.zeros(N, 2, device=dev)
-        if self.dynamics == "unicycle":
-            self.v = torch.zeros(N, device=dev)
-            self.th = self._rand_uniform((N,), -math.pi, math.pi)  # random initial heading
-        else:
-            self.vel = torch.zeros(N, 2, device=dev)
+        self.v = torch.zeros(N, device=dev)
+        self.th = self._rand_uniform((N,), -math.pi, math.pi)  # random initial heading
         self.goal = self._place_clear_point(self.hazards)
         self.last_dist = (self.goal - self.pos).norm(dim=-1)
         self.t = torch.zeros(N, dtype=torch.long, device=dev)
@@ -184,32 +160,22 @@ class PointToGoal:
         goal_rel = self.goal - self.pos                    # (N, 2)
         hazards_rel = self.hazards - self.pos.unsqueeze(1)  # (N, H, 2)
 
-        if self.dynamics == "unicycle":
-            # Body-frame observation: the agent's absolute orientation in the
-            # world is meaningless to the policy once everything else is
-            # relative, so we rotate goal/hazards by -th and only keep speed
-            # (not cos/sin of the absolute heading).
-            cos_th, sin_th = torch.cos(self.th), torch.sin(self.th)
-            goal_obs = self._to_body_frame(goal_rel, cos_th, sin_th)
-            hazards_obs = self._to_body_frame(hazards_rel, cos_th.unsqueeze(-1), sin_th.unsqueeze(-1))
-            return torch.cat([self.v.unsqueeze(-1), goal_obs, hazards_obs.reshape(self.N, -1)], dim=-1)
-
-        # Double integrator has no heading, so there's no body frame to
-        # rotate into -- everything stays in world-frame coordinates.
-        return torch.cat([self.vel, goal_rel, hazards_rel.reshape(self.N, -1)], dim=-1)
+        # Body-frame observation: the agent's absolute orientation in the
+        # world is meaningless to the policy once everything else is
+        # relative, so we rotate goal/hazards by -th and only keep speed
+        # (not cos/sin of the absolute heading).
+        cos_th, sin_th = torch.cos(self.th), torch.sin(self.th)
+        goal_obs = self._to_body_frame(goal_rel, cos_th, sin_th)
+        hazards_obs = self._to_body_frame(hazards_rel, cos_th.unsqueeze(-1), sin_th.unsqueeze(-1))
+        return torch.cat([self.v.unsqueeze(-1), goal_obs, hazards_obs.reshape(self.N, -1)], dim=-1)
 
     @torch.no_grad()
     def step(self, action):
-        if self.dynamics == "unicycle":
-            self.pos, self.v, self.th = unicycle_update(
-                self.pos, self.v, self.th, action, self.dt, self.k, self.c, self.w_max
-            )
-            heading = self.th
-            vel_world = self.v.unsqueeze(-1) * torch.stack([torch.cos(self.th), torch.sin(self.th)], dim=-1)
-        else:
-            self.pos, self.vel = double_integrator_update(self.pos, self.vel, action, self.dt, self.c)
-            heading = None
-            vel_world = self.vel
+        self.pos, self.v, self.th = unicycle_update(
+            self.pos, self.v, self.th, action, self.dt, self.k, self.c, self.w_max
+        )
+        heading = self.th
+        vel_world = self.v.unsqueeze(-1) * torch.stack([torch.cos(self.th), torch.sin(self.th)], dim=-1)
 
         # Keep the agent inside the world -- goals/hazards are only ever
         # placed in [-extent, extent], so nothing useful is out there anyway.
@@ -251,11 +217,8 @@ class PointToGoal:
         self.hazards = torch.where(done.view(-1, 1, 1), new_hazards, self.hazards)
         new_start_pos = self._place_clear_point(self.hazards) if self.randomize_start_pos else torch.zeros_like(self.pos)
         self.pos = torch.where(done2, new_start_pos, self.pos)
-        if self.dynamics == "unicycle":
-            self.v = torch.where(done, torch.zeros_like(self.v), self.v)
-            self.th = torch.where(done, self._rand_uniform((self.N,), -math.pi, math.pi), self.th)
-        else:
-            self.vel = torch.where(done2, torch.zeros_like(self.vel), self.vel)
+        self.v = torch.where(done, torch.zeros_like(self.v), self.v)
+        self.th = torch.where(done, self._rand_uniform((self.N,), -math.pi, math.pi), self.th)
         self.goal = torch.where(done2, self._place_clear_point(self.hazards), self.goal)
         self.last_dist = (self.goal - self.pos).norm(dim=-1)
         self.t = torch.where(done, torch.zeros_like(self.t), self.t)
