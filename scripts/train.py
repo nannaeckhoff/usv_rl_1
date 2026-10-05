@@ -62,14 +62,18 @@ class ActorCritic(nn.Module):
         mean, std, value = self.forward(obs)
         if deterministic:
             return mean, None, value
-        dist = Normal(mean, std)
+        dist = Normal(mean, std, validate_args=False)  # see evaluate_actions
         action = dist.sample()
         log_prob = dist.log_prob(action).sum(-1)
         return action, log_prob, value
 
     def evaluate_actions(self, obs, actions):
         mean, std, value = self.forward(obs)
-        dist = Normal(mean, std)
+        # validate_args=False: the default argument checks run a Python `if`
+        # on a GPU tensor (e.g. "is std > 0?"), forcing a CPU<->GPU sync on
+        # every construction and every log_prob call. std = exp(log_std) is
+        # always positive anyway.
+        dist = Normal(mean, std, validate_args=False)
         log_prob = dist.log_prob(actions).sum(-1)
         entropy = dist.entropy().sum(-1)
         return log_prob, entropy, value
