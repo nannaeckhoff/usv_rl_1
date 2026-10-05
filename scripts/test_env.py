@@ -80,14 +80,15 @@ def check_unicycle_circle():
 
 
 def check_speed_clamp_and_braking():
-    print("[1c] speed: clamp, braking, coasting, old-model equilibrium ...", end=" ")
+    print("[1c] speed: clamp, reversing, coasting, drag equilibrium ...", end=" ")
     N = 4
     full_thrust = torch.tensor([[1.0, 0.0]]).repeat(N, 1)
     full_brake = torch.tensor([[-1.0, 0.0]]).repeat(N, 1)
     zero_thrust = torch.tensor([[0.0, 0.0]]).repeat(N, 1)
 
-    # Default (minimal) model: k=1, c=0, v_max=1, thrust_mode="bidirectional".
-    env = PointToGoal(N=N, dev="cpu", horizon=200, num_hazards=0, seed=2)
+    # Drag-free model: c=0, so the symmetric [-v_max, v_max] clamp bounds v.
+    env = PointToGoal(N=N, dev="cpu", horizon=200, num_hazards=0, c=0.0, v_max=1.0,
+                      thrust_mode="bidirectional", seed=2)
     env.reset()
     _push_goal_far_away(env)
 
@@ -100,8 +101,8 @@ def check_speed_clamp_and_braking():
     env.v = torch.full((N,), env.v_max)
     for _ in range(50):
         env.step(full_brake)
-        assert (env.v >= 0.0).all(), "v must never go negative"
-    assert torch.allclose(env.v, torch.zeros(N), atol=1e-6), "full brake from v_max should bring v to exactly 0"
+    assert torch.allclose(env.v, torch.full((N,), -env.v_max), atol=1e-6), \
+        "full reverse from v_max should drive v to -v_max (bidirectional can reverse)"
 
     env.v = torch.full((N,), 0.4)
     coast_v = env.v.clone()
@@ -109,18 +110,30 @@ def check_speed_clamp_and_braking():
         env.step(zero_thrust)
     assert torch.allclose(env.v, coast_v, atol=1e-6), "zero thrust should neither speed up nor slow down (c=0)"
 
-    # Old model reproduced via config: c > 0, thrust_mode="forward_only", v_max=inf.
-    # Speed should converge to the drag equilibrium k/c instead of any hard clamp.
-    k, c = 1.0, 0.5
-    env_old = PointToGoal(N=N, dev="cpu", horizon=1000, num_hazards=0, k=k, c=c, w_max=1.0,
-                           v_max=float("inf"), thrust_mode="forward_only", seed=3)
-    env_old.reset()
-    _push_goal_far_away(env_old)
-    env_old.v = torch.zeros(N)
+    # Default damped model (c > 0, v_max = inf): speed converges to the drag
+    # equilibrium +k/c under full thrust and -k/c under full reverse.
+    env_d = PointToGoal(N=N, dev="cpu", horizon=1000, num_hazards=0, seed=3)
+    k, c = env_d.k, env_d.c
+    env_d.reset()
+    _push_goal_far_away(env_d)
+    env_d.v = torch.zeros(N)
     for _ in range(300):
-        env_old.step(full_thrust)
-    assert torch.allclose(env_old.v, torch.full((N,), k / c), atol=1e-3), \
-        "old-model full throttle should converge to the k/c drag equilibrium, not clamp"
+        env_d.step(full_thrust)
+    assert torch.allclose(env_d.v, torch.full((N,), k / c), atol=1e-3), \
+        "full throttle should converge to the +k/c drag equilibrium"
+    for _ in range(300):
+        env_d.step(full_brake)
+    assert torch.allclose(env_d.v, torch.full((N,), -k / c), atol=1e-3), \
+        "full reverse should converge to the -k/c drag equilibrium"
+
+    # forward_only: never reverses, even at the lowest thrust.
+    env_f = PointToGoal(N=N, dev="cpu", horizon=200, num_hazards=0, thrust_mode="forward_only", seed=4)
+    env_f.reset()
+    _push_goal_far_away(env_f)
+    env_f.v = torch.zeros(N)
+    for _ in range(50):
+        env_f.step(full_brake)
+        assert (env_f.v >= 0.0).all(), "forward_only: v must never go negative"
     print("OK")
 
 
@@ -147,7 +160,7 @@ def unicycle_heuristic_action(obs):
     goal_x, goal_y = obs[:, 1], obs[:, 2]
     angle_to_goal = torch.atan2(goal_y, goal_x)
     turn = torch.clamp(angle_to_goal / (math.pi / 2), -1.0, 1.0)
-    thrust = torch.cos(angle_to_goal)  # ~1 facing the goal, ~0 sideways, ~0 (not reverse) when behind
+    thrust = torch.cos(angle_to_goal).clamp(min=0.0)  # ~1 facing the goal, 0 (coast, don't reverse) sideways/behind
     return torch.stack([thrust, turn], dim=-1)
 
 

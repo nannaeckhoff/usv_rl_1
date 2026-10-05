@@ -21,24 +21,33 @@
 # horizon. Either way the env is auto-reset via masks, so shapes stay fixed.
 
 import math
+import warnings
 
 import torch
 
 
 def unicycle_update(pos, v, th, action, dt, k, c, w_max, v_max, thrust_mode):
     """Nonholonomic unicycle: thrust a1 and turn rate a2, both in [-1, 1].
-    pos: (N, 2), v: (N,), th: (N,) heading in radians.
+    pos: (N, 2), v: (N,) signed speed along the heading, th: (N,) heading in
+    radians.
+
+        v  <- v + dt * (k * a1 - c * v)
+        th <- th + dt * w_max * a2
+        pos <- pos + dt * v * [cos th, sin th]
 
     thrust_mode selects how a1 is interpreted:
-      "forward_only": a1 mapped to [0, 1] -- can only ever speed up or coast,
-        matches a USV that mainly drives forward (the original behaviour).
-      "bidirectional": a1 used as-is in [-1, 1] -- negative a1 actively
-        brakes/reverses thrust, needed since with c = 0 (no drag) there is
-        otherwise nothing that ever slows the boat down.
+      "bidirectional" (default): a1 used as-is in [-1, 1], matching the
+        MuJoCo point robot's [-1, 1] action range. Negative a1 brakes and,
+        once v reaches 0, reverses -- v can go negative (driving backwards).
+        v is clamped to [-v_max, v_max].
+      "forward_only": a1 mapped to [0, 1] -- can only speed up or coast,
+        never reverse. v is clamped to [0, v_max].
 
-    v is always clamped to [0, v_max] after the update: with c = 0 the drag
-    term no longer bounds speed on its own, so the clamp is what takes over
-    that job. v_max = inf reproduces the old, unclamped behaviour.
+    With drag c > 0 (the default) speed is already bounded by the drag
+    equilibrium |v| <= k/c, so v_max = inf (no clamp) is the normal setting;
+    the clamp only really matters when c = 0, where nothing else bounds v.
+    The explicit Euler step needs c*dt well below 1 to stay stable (checked
+    in PointToGoal.__init__).
     """
     a1 = action[:, 0].clamp(-1.0, 1.0)
     a2 = action[:, 1].clamp(-1.0, 1.0)
@@ -46,7 +55,8 @@ def unicycle_update(pos, v, th, action, dt, k, c, w_max, v_max, thrust_mode):
         a1 = (a1 + 1.0) * 0.5
 
     v = v + dt * (k * a1 - c * v)
-    v = v.clamp(min=0.0, max=v_max)
+    v_min = 0.0 if thrust_mode == "forward_only" else -v_max
+    v = v.clamp(min=v_min, max=v_max)
     th = th + dt * w_max * a2
     th = (th + math.pi) % (2 * math.pi) - math.pi  # wrap to [-pi, pi)
 
@@ -83,7 +93,7 @@ def compute_cost(pos, vel, heading, hazards, hazard_radius):
 
 class PointToGoal:
     def __init__(self, N, dev="cuda", dt=0.1, horizon=1000,
-                 k=1.0, c=0.0, w_max=1.0, v_max=1.0, thrust_mode="bidirectional",
+                 k=1.0, c=0.5, w_max=1.0, v_max=None, thrust_mode="bidirectional",
                  world_half_extent=5.0, goal_radius=0.3, goal_bonus=1.0,
                  num_hazards=3, hazard_radius=0.5, placement_resample_rounds=10,
                  randomize_start_pos=False, seed=0):
@@ -92,6 +102,18 @@ class PointToGoal:
                                "refusing to silently fall back to CPU")
         if thrust_mode not in ("bidirectional", "forward_only"):
             raise ValueError(f"thrust_mode must be 'bidirectional' or 'forward_only', got {thrust_mode!r}")
+        # Euler stability of the drag term: v <- (1 - c*dt) v + ... must keep
+        # 1 - c*dt clearly positive, otherwise drag overshoots past zero and
+        # flips the sign of v every step instead of decaying it.
+        if c < 0:
+            raise ValueError(f"drag c must be >= 0, got {c}")
+        if c * dt >= 1.0:
+            raise ValueError(f"c*dt = {c * dt:.3g} >= 1: Euler drag update is unstable, reduce c or dt")
+        if c * dt > 0.1:
+            warnings.warn(f"c*dt = {c * dt:.3g} is not well below 1; the Euler drag update may be inaccurate",
+                          stacklevel=2)
+        if c == 0 and (v_max is None or math.isinf(v_max)):
+            warnings.warn("c = 0 and v_max = inf: nothing bounds the speed", stacklevel=2)
         self.N, self.dev, self.dt = N, dev, dt
         self.horizon = horizon
         self.k, self.c, self.w_max = k, c, w_max          # thrust gain, drag, max turn rate
@@ -115,7 +137,7 @@ class PointToGoal:
 
         # State tensors are allocated in reset().
         self.pos = None      # (N, 2)
-        self.v = None        # (N,)      forward speed
+        self.v = None        # (N,)      signed speed along heading (< 0 = reversing)
         self.th = None       # (N,)      heading, radians
         self.goal = None     # (N, 2)
         self.hazards = None  # (N, H, 2)

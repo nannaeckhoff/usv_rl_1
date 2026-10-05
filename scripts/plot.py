@@ -135,9 +135,22 @@ def plot_ppo_diagnostics(metrics_path, out_path):
 
 
 def plot_trajectory(checkpoint_path, out_path):
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+
+    # Evaluate under the dynamics the checkpoint was trained with, not
+    # whatever config.py says now. Checkpoints saved before the "dynamics"
+    # key existed fall back to config.py, with a warning.
+    dyn = checkpoint.get("dynamics")
+    if dyn is None:
+        print(f"WARNING: {checkpoint_path} has no saved dynamics -- using the current config.py values, "
+              "which may not match what it was trained with")
+        dyn = {"dt": cfg.DT, "k": cfg.K_THRUST, "c": cfg.DRAG_COEF,
+               "w_max": cfg.W_MAX, "v_max": cfg.V_MAX, "thrust_mode": cfg.THRUST_MODE}
+    print(f"Trajectory dynamics: {dyn}")
+
     env = PointToGoal(
-        N=1, dev="cpu", dt=cfg.DT, horizon=cfg.HORIZON,
-        k=cfg.K_THRUST, c=cfg.DRAG_COEF, w_max=cfg.W_MAX, v_max=cfg.V_MAX, thrust_mode=cfg.THRUST_MODE,
+        N=1, dev="cpu", dt=dyn["dt"], horizon=cfg.HORIZON,
+        k=dyn["k"], c=dyn["c"], w_max=dyn["w_max"], v_max=dyn["v_max"], thrust_mode=dyn["thrust_mode"],
         world_half_extent=cfg.WORLD_HALF_EXTENT, goal_radius=cfg.GOAL_RADIUS, goal_bonus=cfg.GOAL_BONUS,
         num_hazards=cfg.NUM_HAZARDS, hazard_radius=cfg.HAZARD_RADIUS,
         placement_resample_rounds=cfg.PLACEMENT_RESAMPLE_ROUNDS,
@@ -145,7 +158,6 @@ def plot_trajectory(checkpoint_path, out_path):
     )
 
     net = ActorCritic(env.obs_dim, env.act_dim, cfg.HIDDEN_SIZE, cfg.LOG_STD_INIT).to(env.dev)
-    checkpoint = torch.load(checkpoint_path, map_location=env.dev)
     net.load_state_dict(checkpoint["model"])
     net.eval()
 

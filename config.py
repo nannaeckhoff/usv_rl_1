@@ -19,19 +19,20 @@ N_ENVS = 4096      # number of parallel environments simulated at once
 DT = 0.1           # simulation timestep
 HORIZON = 1000     # steps per episode before it resets
 
-# Unicycle motion model constants. Default is the minimal, drag-free model:
-# speed is a plain thrust integrator, bounded by an explicit clamp (V_MAX)
-# instead of an equilibrium between thrust and drag, and the agent can brake
-# (THRUST_MODE "bidirectional": a1 < 0 slows it down).
+# Unicycle motion model constants. Default is the damped model: drag bounds
+# speed to |v| <= K_THRUST/DRAG_COEF on its own, so no explicit clamp is
+# needed, and the agent can brake and reverse (THRUST_MODE "bidirectional",
+# same [-1, 1] action range as the MuJoCo point robot). DRAG_COEF*DT must
+# stay well below 1 for the Euler update to be stable (checked in env).
 #
-# To reproduce the old drag-based model instead, set:
-#   DRAG_COEF = 0.5, W_MAX = 3.0, THRUST_MODE = "forward_only", V_MAX = None
+# To get the drag-free model instead, set DRAG_COEF = 0.0 and V_MAX = 1.0
+# (the clamp is then the only thing bounding speed).
 K_THRUST = 1.0        # k: how strongly thrust increases speed
-DRAG_COEF = 0.0       # c: how strongly drag decreases speed (0 = no drag)
+DRAG_COEF = 0.5       # c: how strongly drag decreases speed (0 = no drag)
 W_MAX = 1.0           # max turn rate, rad/s
-V_MAX = 1.0           # hard speed clamp: v is kept in [0, V_MAX] (None/inf = unclamped)
-THRUST_MODE = "bidirectional"  # "bidirectional": a1 in [-1,1], negative brakes.
-                                # "forward_only": a1 mapped to [0,1], never brakes.
+V_MAX = None          # hard speed clamp: v in [-V_MAX, V_MAX] ([0, V_MAX] if forward_only); None/inf = unclamped
+THRUST_MODE = "bidirectional"  # "bidirectional": a1 in [-1,1], negative brakes, then reverses.
+                                # "forward_only": a1 mapped to [0,1], never reverses.
 
 WORLD_HALF_EXTENT = 5.0  # goal/hazards are sampled in [-extent, extent]^2; agent position is clamped to it
 GOAL_RADIUS = 0.3
