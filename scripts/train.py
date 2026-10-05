@@ -30,6 +30,10 @@ from tqdm import tqdm
 import config as cfg
 from environment import PointToGoal
 
+# Shared machine: all real work is on the GPU, so don't let PyTorch spin up
+# one CPU thread per core for the few small CPU-side ops.
+torch.set_num_threads(1)
+
 
 # --- policy/value network: small Tanh MLP + a learnable log_std ---
 
@@ -234,7 +238,14 @@ def train():
         adv_flat = advantages.reshape(batch_size)
         ret_flat = returns.reshape(batch_size)
 
-        policy_loss_sum = value_loss_sum = entropy_sum = approx_kl_sum = clip_frac_sum = 0.0
+        # Accumulated as GPU tensors, not Python floats: a .item() per
+        # minibatch would force a CPU<->GPU sync (and a busy-waiting CPU core)
+        # every minibatch. Read out once, in the logging block below.
+        policy_loss_sum = torch.zeros((), device=env.dev)
+        value_loss_sum = torch.zeros((), device=env.dev)
+        entropy_sum = torch.zeros((), device=env.dev)
+        approx_kl_sum = torch.zeros((), device=env.dev)
+        clip_frac_sum = torch.zeros((), device=env.dev)
         n_minibatches = 0
         for _ in range(cfg.EPOCHS):
             perm = torch.randperm(batch_size, device=env.dev)
@@ -268,32 +279,41 @@ def train():
                     approx_kl = ((ratio - 1.0) - log_ratio).mean()
                     clip_frac = ((ratio - 1.0).abs() > cfg.CLIP_EPS).float().mean()
 
-                policy_loss_sum += policy_loss.item()
-                value_loss_sum += value_loss.item()
-                entropy_sum += entropy_mean.item()
-                approx_kl_sum += approx_kl.item()
-                clip_frac_sum += clip_frac.item()
+                policy_loss_sum += policy_loss.detach()
+                value_loss_sum += value_loss.detach()
+                entropy_sum += entropy_mean.detach()
+                approx_kl_sum += approx_kl
+                clip_frac_sum += clip_frac
                 n_minibatches += 1
 
         # --- logging: everything above ran without touching the CPU; this
-        # is the one sync per round, after the rollout and the update ---
+        # is the one sync per round -- all scalars are stacked on the GPU
+        # and copied over in a single .tolist() ---
+        (reward_total, cost_total, violation_total, terminated_total, done_total,
+         episode_length_total, policy_loss_total, value_loss_total, entropy_total,
+         approx_kl_total, clip_frac_total) = torch.stack([
+            reward_sum.mean(), cost_sum.mean(), violation_sum.mean(),
+            terminated_sum.sum(), done_sum.sum(), episode_length_sum.sum(),
+            policy_loss_sum, value_loss_sum, entropy_sum, approx_kl_sum, clip_frac_sum,
+        ]).tolist()
+        # Timed after the sync, so it includes the GPU work that was still
+        # queued -- before it, the clock would only see kernel launches.
         elapsed = time.perf_counter() - round_start
-        done_total = done_sum.sum().item()
         row = {
             "update": update,
             "env_steps": update * T * N,
             "lr": optimizer.param_groups[0]["lr"],
-            "reward_per_step": reward_sum.mean().item() / T,
-            "cost_per_step": cost_sum.mean().item() / T,
-            "violation_rate": violation_sum.mean().item() / T,
-            "success_rate": terminated_sum.sum().item() / done_total if done_total > 0 else float("nan"),
-            "mean_episode_length": episode_length_sum.sum().item() / done_total if done_total > 0 else float("nan"),
+            "reward_per_step": reward_total / T,
+            "cost_per_step": cost_total / T,
+            "violation_rate": violation_total / T,
+            "success_rate": terminated_total / done_total if done_total > 0 else float("nan"),
+            "mean_episode_length": episode_length_total / done_total if done_total > 0 else float("nan"),
             "steps_per_sec": (T * N) / elapsed,
-            "policy_loss": policy_loss_sum / n_minibatches,
-            "value_loss": value_loss_sum / n_minibatches,
-            "entropy": entropy_sum / n_minibatches,
-            "approx_kl": approx_kl_sum / n_minibatches,
-            "clip_frac": clip_frac_sum / n_minibatches,
+            "policy_loss": policy_loss_total / n_minibatches,
+            "value_loss": value_loss_total / n_minibatches,
+            "entropy": entropy_total / n_minibatches,
+            "approx_kl": approx_kl_total / n_minibatches,
+            "clip_frac": clip_frac_total / n_minibatches,
         }
         metrics_writer.writerow(row)
         metrics_file.flush()

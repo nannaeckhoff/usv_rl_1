@@ -4,10 +4,12 @@
 
 import os
 
-import torch
-
 # --- Device ---
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# No silent CPU fallback: training runs on a shared machine where the CPU
+# belongs to someone else, so PointToGoal raises if CUDA is missing instead
+# of quietly eating every core. (Checked there, not here, so plot.py /
+# test_env.py -- which import this file but run on CPU -- still work anywhere.)
+DEVICE = "cuda"
 
 # --- Reproducibility ---
 SEED = 42

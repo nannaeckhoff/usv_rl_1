@@ -88,7 +88,8 @@ class PointToGoal:
                  num_hazards=3, hazard_radius=0.5, placement_resample_rounds=10,
                  randomize_start_pos=False, seed=0):
         if dev == "cuda" and not torch.cuda.is_available():
-            dev = "cpu"
+            raise RuntimeError("dev='cuda' requested but CUDA is not available -- "
+                               "refusing to silently fall back to CPU")
         if thrust_mode not in ("bidirectional", "forward_only"):
             raise ValueError(f"thrust_mode must be 'bidirectional' or 'forward_only', got {thrust_mode!r}")
         self.N, self.dev, self.dt = N, dev, dt
