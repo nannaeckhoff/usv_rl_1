@@ -22,6 +22,9 @@ import torch
 import config as cfg
 from environment import PointToGoal, SAFETY_MODES, compute_cost
 
+# Runs on the CPU; on the shared machine don't spin up one thread per core.
+torch.set_num_threads(1)
+
 
 def _push_goal_far_away(env):
     """For pure-dynamics checks: make sure the agent can't accidentally
