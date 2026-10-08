@@ -1,0 +1,18 @@
+{
+  "run_id": "2026-10-08_141422_stage_b_penetration",
+  "started": "2026-10-08T14:14:22",
+  "command": "python scripts/train.py --preset stage_b --seeds 1 2 3 4 5 --note \"stage B, penetration\"",
+  "note": "stage B, penetration",
+  "preset": "stage_b",
+  "seeds": [
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "overrides": {},
+  "commit": "35bd7c040be64e4a0f9dff5f35499ec59e45eb86",
+  "branch": "main",
+  "dirty": false
+}
