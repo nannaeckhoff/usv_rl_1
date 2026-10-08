@@ -84,7 +84,7 @@ def check_unicycle_circle():
 
 
 def check_speed_clamp_and_braking():
-    print("[1c] speed: clamp, reversing, coasting, drag equilibrium ...", end=" ")
+    print("[1c] speed: clamp, reversing, coasting, drag equilibrium, weaker reverse ...", end=" ")
     N = 4
     full_thrust = torch.tensor([[1.0, 0.0]]).repeat(N, 1)
     full_brake = torch.tensor([[-1.0, 0.0]]).repeat(N, 1)
@@ -129,6 +129,22 @@ def check_speed_clamp_and_braking():
         env_d.step(full_brake)
     assert torch.allclose(env_d.v, torch.full((N,), -k / c), atol=1e-3), \
         "full reverse should converge to the -k/c drag equilibrium"
+
+    # Weaker reverse: forward equilibrium unchanged, reverse settles at
+    # reverse_scale * k/c.
+    s = 0.3
+    env_s = PointToGoal(N=N, dev="cpu", horizon=1000, num_hazards=0, reverse_scale=s, seed=5)
+    env_s.reset()
+    _push_goal_far_away(env_s)
+    env_s.v = torch.zeros(N)
+    for _ in range(300):
+        env_s.step(full_thrust)
+    assert torch.allclose(env_s.v, torch.full((N,), k / c), atol=1e-3), \
+        "reverse_scale must not change forward thrust"
+    for _ in range(300):
+        env_s.step(full_brake)
+    assert torch.allclose(env_s.v, torch.full((N,), -s * k / c), atol=1e-3), \
+        "full reverse should converge to -reverse_scale * k/c"
 
     # forward_only: never reverses, even at the lowest thrust.
     env_f = PointToGoal(N=N, dev="cpu", horizon=200, num_hazards=0, thrust_mode="forward_only", seed=4)
@@ -186,6 +202,7 @@ def _build_stage_a_env(N, seed):
     return PointToGoal(
         N=N, dev="cpu", horizon=cfg.HORIZON,
         k=cfg.K_THRUST, c=cfg.DRAG_COEF, w_max=cfg.W_MAX, v_max=cfg.V_MAX, thrust_mode=cfg.THRUST_MODE,
+        reverse_scale=cfg.REVERSE_THRUST_SCALE,
         world_half_extent=cfg.WORLD_HALF_EXTENT, goal_radius=cfg.GOAL_RADIUS, goal_bonus=cfg.GOAL_BONUS,
         num_hazards=cfg.NUM_HAZARDS, hazard_radius=cfg.HAZARD_RADIUS, seed=seed,
     )

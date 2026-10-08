@@ -27,7 +27,7 @@ import warnings
 import torch
 
 
-def unicycle_update(pos, v, th, action, dt, k, c, w_max, v_max, thrust_mode):
+def unicycle_update(pos, v, th, action, dt, k, c, w_max, v_max, thrust_mode, reverse_scale=1.0):
     """Nonholonomic unicycle: thrust a1 and turn rate a2, both in [-1, 1].
     pos: (N, 2), v: (N,) signed speed along the heading, th: (N,) heading in
     radians.
@@ -37,12 +37,15 @@ def unicycle_update(pos, v, th, action, dt, k, c, w_max, v_max, thrust_mode):
         pos <- pos + dt * v * [cos th, sin th]
 
     thrust_mode selects how a1 is interpreted:
-      "bidirectional" (default): a1 used as-is in [-1, 1], matching the
-        MuJoCo point robot's [-1, 1] action range. Negative a1 brakes and,
-        once v reaches 0, reverses -- v can go negative (driving backwards).
-        v is clamped to [-v_max, v_max].
+      "bidirectional" (default): a1 in [-1, 1], matching the MuJoCo point
+        robot's [-1, 1] action range. Negative a1 brakes and, once v
+        reaches 0, reverses -- v can go negative (driving backwards).
+        Negative a1 is scaled by reverse_scale (a boat's propeller pushes
+        much weaker astern than ahead), so reverse top speed is
+        reverse_scale * k/c and turning around beats backing up over long
+        distances. v is clamped to [-v_max, v_max].
       "forward_only": a1 mapped to [0, 1] -- can only speed up or coast,
-        never reverse. v is clamped to [0, v_max].
+        never reverse. v is clamped to [0, v_max]. reverse_scale is unused.
 
     With drag c > 0 (the default) speed is already bounded by the drag
     equilibrium |v| <= k/c, so v_max = inf (no clamp) is the normal setting;
@@ -54,6 +57,8 @@ def unicycle_update(pos, v, th, action, dt, k, c, w_max, v_max, thrust_mode):
     a2 = action[:, 1].clamp(-1.0, 1.0)
     if thrust_mode == "forward_only":
         a1 = (a1 + 1.0) * 0.5
+    else:
+        a1 = torch.where(a1 < 0, a1 * reverse_scale, a1)
 
     v = v + dt * (k * a1 - c * v)
     v_min = 0.0 if thrust_mode == "forward_only" else -v_max
@@ -130,7 +135,7 @@ def compute_cost(pos, vel, heading, hazards, hazard_radius, mode="penetration", 
 
 class PointToGoal:
     def __init__(self, N, dev="cuda", dt=0.1, horizon=1000,
-                 k=1.0, c=0.5, w_max=1.0, v_max=None, thrust_mode="bidirectional",
+                 k=1.0, c=0.5, w_max=1.0, v_max=None, thrust_mode="bidirectional", reverse_scale=1.0,
                  world_half_extent=5.0, goal_radius=0.3, goal_bonus=1.0,
                  num_hazards=3, hazard_radius=0.5, placement_resample_rounds=10,
                  randomize_start_pos=False, safety_mode="penetration", safety_margin=0.5, seed=0):
@@ -139,6 +144,8 @@ class PointToGoal:
                                "refusing to silently fall back to CPU")
         if thrust_mode not in ("bidirectional", "forward_only"):
             raise ValueError(f"thrust_mode must be 'bidirectional' or 'forward_only', got {thrust_mode!r}")
+        if not 0.0 <= reverse_scale <= 1.0:
+            raise ValueError(f"reverse_scale must be in [0, 1], got {reverse_scale}")
         if safety_mode not in SAFETY_MODES:
             raise ValueError(f"safety_mode must be one of {SAFETY_MODES}, got {safety_mode!r}")
         if safety_margin < 0:
@@ -160,6 +167,7 @@ class PointToGoal:
         self.k, self.c, self.w_max = k, c, w_max          # thrust gain, drag, max turn rate
         self.v_max = float("inf") if v_max is None else v_max
         self.thrust_mode = thrust_mode
+        self.reverse_scale = reverse_scale
         self.world_half_extent = world_half_extent
         self.goal_radius = goal_radius
         self.goal_bonus = goal_bonus
@@ -256,7 +264,7 @@ class PointToGoal:
     def step(self, action):
         self.pos, self.v, self.th = unicycle_update(
             self.pos, self.v, self.th, action, self.dt, self.k, self.c, self.w_max,
-            self.v_max, self.thrust_mode,
+            self.v_max, self.thrust_mode, self.reverse_scale,
         )
         heading = self.th
         vel_world = self.v.unsqueeze(-1) * torch.stack([torch.cos(self.th), torch.sin(self.th)], dim=-1)

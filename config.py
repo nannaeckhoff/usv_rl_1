@@ -33,6 +33,11 @@ W_MAX = 1.0           # max turn rate, rad/s
 V_MAX = None          # hard speed clamp: v in [-V_MAX, V_MAX] ([0, V_MAX] if forward_only); None/inf = unclamped
 THRUST_MODE = "bidirectional"  # "bidirectional": a1 in [-1,1], negative brakes, then reverses.
                                 # "forward_only": a1 mapped to [0,1], never reverses.
+# Strength of negative thrust (braking/reversing) relative to forward, in
+# "bidirectional" mode. A boat pushes much weaker astern, so reverse top
+# speed is REVERSE_THRUST_SCALE * K_THRUST/DRAG_COEF and the agent learns to
+# turn around rather than back up to a goal behind it. 1.0 = symmetric.
+REVERSE_THRUST_SCALE = 0.3
 
 WORLD_HALF_EXTENT = 5.0  # goal/hazards are sampled in [-extent, extent]^2; agent position is clamped to it
 GOAL_RADIUS = 0.3

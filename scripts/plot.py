@@ -152,12 +152,17 @@ def plot_trajectory(checkpoint_path, out_path):
         print(f"WARNING: {checkpoint_path} has no saved dynamics -- using the current config.py values, "
               "which may not match what it was trained with")
         dyn = {"dt": cfg.DT, "k": cfg.K_THRUST, "c": cfg.DRAG_COEF,
-               "w_max": cfg.W_MAX, "v_max": cfg.V_MAX, "thrust_mode": cfg.THRUST_MODE}
+               "w_max": cfg.W_MAX, "v_max": cfg.V_MAX, "thrust_mode": cfg.THRUST_MODE,
+               "reverse_scale": cfg.REVERSE_THRUST_SCALE}
+    # Checkpoints from before reverse_scale existed were trained with
+    # symmetric thrust.
+    dyn.setdefault("reverse_scale", 1.0)
     print(f"Trajectory dynamics: {dyn}")
 
     env = PointToGoal(
         N=1, dev="cpu", dt=dyn["dt"], horizon=cfg.HORIZON,
         k=dyn["k"], c=dyn["c"], w_max=dyn["w_max"], v_max=dyn["v_max"], thrust_mode=dyn["thrust_mode"],
+        reverse_scale=dyn["reverse_scale"],
         world_half_extent=cfg.WORLD_HALF_EXTENT, goal_radius=cfg.GOAL_RADIUS, goal_bonus=cfg.GOAL_BONUS,
         num_hazards=cfg.NUM_HAZARDS, hazard_radius=cfg.HAZARD_RADIUS,
         placement_resample_rounds=cfg.PLACEMENT_RESAMPLE_ROUNDS,

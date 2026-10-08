@@ -69,9 +69,19 @@ def apply_overrides(cfg, assignments):
     return overrides
 
 
+# Config keys added after some runs were already made, with the value those
+# older runs effectively used -- their config.json doesn't have the key, and
+# today's config.py default would be wrong for them.
+PRE_EXISTING_DEFAULTS = {
+    "REVERSE_THRUST_SCALE": 1.0,  # thrust used to be symmetric
+}
+
+
 def load_run_config(cfg, run_dir):
     """Overwrite config with the values a run was trained with (for
     plotting/evaluating it later, independent of what config.py says now)."""
+    for key, value in PRE_EXISTING_DEFAULTS.items():
+        setattr(cfg, key, value)
     with open(os.path.join(run_dir, "config.json")) as f:
         for key, value in json.load(f).items():
             setattr(cfg, key, value)
