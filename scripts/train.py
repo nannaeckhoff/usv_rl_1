@@ -7,13 +7,21 @@
 # printed/logged once per round.
 #
 # Run: python scripts/train.py [--preset stage_a] [--seeds 1 2 3 4 5]
+#                              [--set KEY=VALUE ...] [--note "..."] [--name label]
 #   no --preset  -- trains with the constants as they currently stand in
 #                   config.py (single run, config.SEED)
 #   --preset     -- overwrite those constants with a named preset from
 #                   config.PRESETS first (e.g. stage_a, stage_b)
+#   --set        -- override individual config values for this run without
+#                   editing config.py, e.g. --set SAFETY_MODE=proximity LAMBDA_COST=2
 #   --seeds      -- train once per seed instead of a single config.SEED run;
-#                   each seed gets its own checkpoint/metrics.csv, and a
-#                   mean +/- std summary is printed across seeds at the end
+#                   a mean +/- std summary is printed across seeds at the end
+#   --note       -- free-text description, saved with the run and in runs.csv
+#   --name       -- short label appended to the run folder name
+#
+# Every invocation gets its own results/runs/<run>/ folder (config, git
+# commit, uncommitted code diff, one seed_<N>/ subfolder per seed) and a
+# row in results/runs.csv -- see run_tracking.py.
 
 import csv
 import sys
@@ -28,6 +36,7 @@ from torch.distributions import Normal
 from tqdm import tqdm
 
 import config as cfg
+import run_tracking
 from environment import PointToGoal
 
 # Shared machine: all real work is on the GPU, so don't let PyTorch spin up
@@ -142,7 +151,8 @@ def train():
         world_half_extent=cfg.WORLD_HALF_EXTENT, goal_radius=cfg.GOAL_RADIUS, goal_bonus=cfg.GOAL_BONUS,
         num_hazards=cfg.NUM_HAZARDS, hazard_radius=cfg.HAZARD_RADIUS,
         placement_resample_rounds=cfg.PLACEMENT_RESAMPLE_ROUNDS,
-        randomize_start_pos=cfg.RANDOMIZE_START_POS, seed=cfg.SEED,
+        randomize_start_pos=cfg.RANDOMIZE_START_POS,
+        safety_mode=cfg.SAFETY_MODE, safety_margin=cfg.SAFETY_MARGIN, seed=cfg.SEED,
     )
     net = ActorCritic(env.obs_dim, env.act_dim, cfg.HIDDEN_SIZE, cfg.LOG_STD_INIT).to(env.dev)
     optimizer = torch.optim.Adam(net.parameters(), lr=cfg.LR)
@@ -351,13 +361,6 @@ def _final_metrics_row(metrics_path):
     return rows[-1]
 
 
-def _mean_std(values):
-    n = len(values)
-    mean = sum(values) / n
-    var = sum((v - mean) ** 2 for v in values) / n  # population std -- just describing these n runs
-    return mean, var ** 0.5
-
-
 if __name__ == "__main__":
     import argparse
 
@@ -366,35 +369,47 @@ if __name__ == "__main__":
                          help="apply a named config preset before training (see config.PRESETS)")
     parser.add_argument("--seeds", type=int, nargs="+", default=None,
                          help="train once per seed (overrides config.SEED), each to its own "
-                              "checkpoint/metrics file, then report mean +/- std across seeds")
+                              "seed_<N>/ subfolder, then report mean +/- std across seeds")
+    parser.add_argument("--set", nargs="+", default=[], metavar="KEY=VALUE",
+                         help="override config values for this run, e.g. --set SAFETY_MODE=proximity LAMBDA_COST=2")
+    parser.add_argument("--note", type=str, default="",
+                         help="free-text description of the run, saved in run_info.json and runs.csv")
+    parser.add_argument("--name", type=str, default=None,
+                         help="short label appended to the run folder name")
     args = parser.parse_args()
     if args.preset:
         cfg.apply_preset(args.preset)
+    overrides = run_tracking.apply_overrides(cfg, args.set)
+    seeds = args.seeds if args.seeds is not None else [cfg.SEED]
 
-    if args.seeds is not None:
-        base, ext = os.path.splitext(cfg.MODEL_SAVE_PATH)
-        per_seed = []
-        for seed in args.seeds:
+    run_dir = run_tracking.create_run(cfg, preset=args.preset, name=args.name, note=args.note,
+                                      seeds=seeds, overrides=overrides)
+    per_seed = []
+    status = "finished"
+    try:
+        for seed in seeds:
             print(f"\n=== seed {seed} ===")
             cfg.SEED = seed
-            cfg.MODEL_SAVE_PATH = f"{base}_seed{seed}{ext}"
-            metrics_path = train()
-            final = _final_metrics_row(metrics_path)
-            per_seed.append({
-                "seed": seed,
-                "reward_per_step": float(final["reward_per_step"]),
-                "success_rate": float(final["success_rate"]),
-                "mean_episode_length": float(final["mean_episode_length"]),
-            })
+            cfg.MODEL_SAVE_PATH = os.path.join(run_tracking.seed_dir(run_dir, seed), "model.pt")
+            final = _final_metrics_row(train())
+            per_seed.append({"seed": seed, **{k: float(final[k]) for k in run_tracking.FINAL_METRIC_KEYS}})
+    except BaseException as e:
+        # Still index the run (with whatever seeds finished), so aborted
+        # runs show up in runs.csv instead of silently missing from it.
+        status = "interrupted" if isinstance(e, KeyboardInterrupt) else "failed"
+        raise
+    finally:
+        run_tracking.append_to_index(run_dir, status, per_seed)
 
-        print("\n=== Per-seed final result ===")
-        for r in per_seed:
-            print(f"  seed {r['seed']:>3}: reward/step={r['reward_per_step']:.3f}  "
-                  f"success_rate={r['success_rate']:.2f}  mean_ep_len={r['mean_episode_length']:.1f}")
+    print("\n=== Per-seed final result ===")
+    for r in per_seed:
+        print(f"  seed {r['seed']:>3}: reward/step={r['reward_per_step']:.3f}  "
+              f"success_rate={r['success_rate']:.2f}  cost/step={r['cost_per_step']:.4f}  "
+              f"mean_ep_len={r['mean_episode_length']:.1f}")
 
+    if len(per_seed) > 1:
         print("\n=== Across seeds (mean +/- std) ===")
-        for key in ("reward_per_step", "success_rate", "mean_episode_length"):
-            mean, std = _mean_std([r[key] for r in per_seed])
+        for key in run_tracking.FINAL_METRIC_KEYS:
+            mean, std = run_tracking.mean_std([r[key] for r in per_seed])
             print(f"  {key}: {mean:.3f} +/- {std:.3f}")
-    else:
-        train()
+    print(f"\nRun saved in: {run_dir}")

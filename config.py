@@ -44,6 +44,17 @@ NUM_HAZARDS = 3
 HAZARD_RADIUS = 0.5
 PLACEMENT_RESAMPLE_ROUNDS = 10  # how hard to try placing goal/hazards clear of each other
 
+# --- Safety representation ---
+# Which cost formula the environment uses (see environment.SAFETY_MODES):
+#   "binary"      -- 1 inside a hazard, 0 outside
+#   "penetration" -- depth inside a hazard, 0 at the edge -> 1 at the center
+#   "proximity"   -- 0 beyond SAFETY_MARGIN outside the edge -> 1 at the center
+#   "velocity"    -- proximity * closing speed toward the nearest hazard
+# Change it here, or per run without editing this file:
+#   python scripts/train.py --set SAFETY_MODE=proximity
+SAFETY_MODE = "penetration"
+SAFETY_MARGIN = 0.5  # extra distance outside the hazard edge where "proximity"/"velocity" start costing
+
 # --- Safety weighting ---
 LAMBDA_COST = 1.0  # training signal = reward - LAMBDA_COST * cost
 
@@ -68,6 +79,8 @@ LOG_STD_INIT = -0.5   # initial log standard deviation of the Gaussian policy
 
 # --- Logging / saving ---
 SAVE_EVERY = 50                             # rounds between checkpoints
+# Only the fallback for scripts run without a run folder -- scripts/train.py
+# always saves into its own results/runs/<run>/seed_<N>/ (see run_tracking.py).
 MODEL_SAVE_PATH = "results/baseline.pt"
 
 # --- Task 1 baseline-stage presets ---

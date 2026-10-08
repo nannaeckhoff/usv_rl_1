@@ -8,10 +8,11 @@
 # vehicle-like, closer to a real USV: it can only move along its heading
 # and must turn before moving sideways.
 #
-# Hazards are circular zones the agent should avoid. The cost is currently
-# one fixed formula (how far the agent has penetrated a hazard) -- reward
-# and cost are always returned separately and never combined here, so a
-# training loop is free to weight them however it wants.
+# Hazards are circular zones the agent should avoid. How the cost is
+# computed from them -- the safety representation -- is selected with
+# safety_mode (see compute_cost / SAFETY_MODES). Reward and cost are always
+# returned separately and never combined here, so a training loop is free
+# to weight them however it wants.
 #
 # Interface mirrors Safety Gym but with tensors:
 #   reset()   -> obs
@@ -77,18 +78,54 @@ def min_hazard_distance(pos, hazards):
     return dist.min(dim=1).values
 
 
-def compute_cost(pos, vel, heading, hazards, hazard_radius):
-    """The safety representation. Currently one fixed formula (penetration
-    depth), but takes the full (pos, vel, heading, hazards) signature so
-    velocity/direction-based cost terms can be added later without having
-    to change this signature everywhere it's called.
+def closing_speed(pos, vel, hazards):
+    """How fast the agent is moving toward the nearest hazard center
+    (velocity component along the direction to it), 0 when moving away or
+    when there are no hazards. vel: (N, 2) world-frame velocity."""
+    N, H = pos.shape[0], hazards.shape[1]
+    if H == 0:
+        return torch.zeros(N, device=pos.device)
+    offset = hazards - pos.unsqueeze(1)                    # (N, H, 2)
+    dist = offset.norm(dim=-1)                             # (N, H)
+    min_dist, idx = dist.min(dim=1)
+    nearest = offset.gather(1, idx.view(N, 1, 1).expand(N, 1, 2)).squeeze(1)  # (N, 2)
+    direction = nearest / min_dist.clamp(min=1e-8).unsqueeze(-1)
+    return (vel * direction).sum(dim=-1).clamp(min=0.0)
+
+
+# The selectable safety representations (config.SAFETY_MODE):
+#   "binary"      -- 1 inside a hazard, 0 outside (collision indicator)
+#   "penetration" -- how deep inside a hazard: 0 at the edge, 1 at the center
+#   "proximity"   -- distance-based: 0 beyond safety_margin outside the
+#                    edge, rising linearly to 1 at the center, so the agent
+#                    is penalized for getting close, not only for entering
+#   "velocity"    -- proximity * closing speed toward the nearest hazard:
+#                    being close is only costly when heading into it. Note
+#                    its scale is in speed units (|v| <= k/c), unlike the
+#                    others which are in [0, 1].
+SAFETY_MODES = ("binary", "penetration", "proximity", "velocity")
+
+
+def compute_cost(pos, vel, heading, hazards, hazard_radius, mode="penetration", safety_margin=0.5):
+    """The safety representation, selected by mode (see SAFETY_MODES).
 
     pos: (N, 2). vel: (N, 2), world-frame velocity (v*[cos th, sin th]).
-    heading: (N,) radians (unused by this formula). hazards: (N, H, 2).
+    heading: (N,) radians (unused by the current formulas). hazards: (N, H, 2).
     """
-    min_dist = min_hazard_distance(pos, hazards)
-    depth = (hazard_radius - min_dist).clamp(min=0.0)  # +inf hazard distance -> depth 0
-    return depth / hazard_radius
+    min_dist = min_hazard_distance(pos, hazards)  # +inf with no hazards -> every mode gives 0
+    if mode == "binary":
+        return (min_dist < hazard_radius).float()
+    if mode == "penetration":
+        depth = (hazard_radius - min_dist).clamp(min=0.0)
+        return depth / hazard_radius
+
+    reach = hazard_radius + safety_margin
+    proximity = ((reach - min_dist) / reach).clamp(0.0, 1.0)
+    if mode == "proximity":
+        return proximity
+    if mode == "velocity":
+        return proximity * closing_speed(pos, vel, hazards)
+    raise ValueError(f"Unknown safety mode: {mode!r}. Options: {SAFETY_MODES}")
 
 
 class PointToGoal:
@@ -96,12 +133,16 @@ class PointToGoal:
                  k=1.0, c=0.5, w_max=1.0, v_max=None, thrust_mode="bidirectional",
                  world_half_extent=5.0, goal_radius=0.3, goal_bonus=1.0,
                  num_hazards=3, hazard_radius=0.5, placement_resample_rounds=10,
-                 randomize_start_pos=False, seed=0):
+                 randomize_start_pos=False, safety_mode="penetration", safety_margin=0.5, seed=0):
         if dev == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("dev='cuda' requested but CUDA is not available -- "
                                "refusing to silently fall back to CPU")
         if thrust_mode not in ("bidirectional", "forward_only"):
             raise ValueError(f"thrust_mode must be 'bidirectional' or 'forward_only', got {thrust_mode!r}")
+        if safety_mode not in SAFETY_MODES:
+            raise ValueError(f"safety_mode must be one of {SAFETY_MODES}, got {safety_mode!r}")
+        if safety_margin < 0:
+            raise ValueError(f"safety_margin must be >= 0, got {safety_margin}")
         # Euler stability of the drag term: v <- (1 - c*dt) v + ... must keep
         # 1 - c*dt clearly positive, otherwise drag overshoots past zero and
         # flips the sign of v every step instead of decaying it.
@@ -126,6 +167,8 @@ class PointToGoal:
         self.hazard_radius = hazard_radius
         self.placement_resample_rounds = placement_resample_rounds
         self.randomize_start_pos = randomize_start_pos
+        self.safety_mode = safety_mode
+        self.safety_margin = safety_margin
 
         # All randomness goes through this generator, so runs are reproducible.
         self.gen = torch.Generator(device=self.dev)
@@ -229,7 +272,8 @@ class PointToGoal:
         terminated = dist < self.goal_radius
         reward = (self.last_dist - dist) + terminated.float() * self.goal_bonus
 
-        cost = compute_cost(self.pos, vel_world, heading, self.hazards, self.hazard_radius)
+        cost = compute_cost(self.pos, vel_world, heading, self.hazards, self.hazard_radius,
+                            self.safety_mode, self.safety_margin)
         min_dist_to_hazard = min_hazard_distance(self.pos, self.hazards)
         ref_in_hazard = min_dist_to_hazard < self.hazard_radius
 

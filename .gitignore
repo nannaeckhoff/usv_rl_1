@@ -1,4 +1,12 @@
 venv/
 __pycache__/
 *.pyc
-results/
+
+# Results: run folders + the runs.csv index are tracked, so runs trained on
+# the GPU machine reach this one via git (scripts/sync_results.py). Plots
+# are not -- regenerate them with scripts/plot.py --run <folder>. Older
+# results (results/stage_a etc.) stay local only.
+results/*
+!results/runs/
+!results/runs.csv
+results/runs/**/*.png

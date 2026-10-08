@@ -6,7 +6,11 @@
 #                           run, read from the metrics.csv logged next to
 #                           the checkpoint by scripts/train.py
 #
-# Run: python scripts/plot.py [--preset stage_a] [--checkpoint PATH]
+# Run: python scripts/plot.py --run results/runs/<run> [--seeds 1 2]
+#        plots every seed of a run (or just --seeds), using the config that
+#        run was trained with -- not whatever config.py says now
+#      python scripts/plot.py [--preset stage_a] [--checkpoint PATH]
+#        a single checkpoint outside a run folder, with the current config.py
 
 import argparse
 import csv
@@ -23,6 +27,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 
 import config as cfg
+import run_tracking
 from environment import PointToGoal
 from train import ActorCritic, RunningMeanStd
 from test_env import _build_stage_a_env as _build_eval_env, run_policy, unicycle_heuristic_action
@@ -30,6 +35,8 @@ from test_env import _build_stage_a_env as _build_eval_env, run_policy, unicycle
 
 def parse_args():
     p = argparse.ArgumentParser(description="Plot a trajectory and training curves for a trained checkpoint.")
+    p.add_argument("--run", type=str, default=None, help="a results/runs/<run> folder from scripts/train.py")
+    p.add_argument("--seeds", type=int, nargs="+", default=None, help="with --run: which seeds (default: all)")
     p.add_argument("--preset", type=str, default=None, choices=list(cfg.PRESETS))
     p.add_argument("--checkpoint", type=str, default=None, help="defaults to config.MODEL_SAVE_PATH")
     p.add_argument("--metrics", type=str, default=None, help="defaults to metrics.csv next to the checkpoint")
@@ -154,7 +161,9 @@ def plot_trajectory(checkpoint_path, out_path):
         world_half_extent=cfg.WORLD_HALF_EXTENT, goal_radius=cfg.GOAL_RADIUS, goal_bonus=cfg.GOAL_BONUS,
         num_hazards=cfg.NUM_HAZARDS, hazard_radius=cfg.HAZARD_RADIUS,
         placement_resample_rounds=cfg.PLACEMENT_RESAMPLE_ROUNDS,
-        randomize_start_pos=cfg.RANDOMIZE_START_POS, seed=cfg.SEED + 1000,  # a scenario not seen during training
+        randomize_start_pos=cfg.RANDOMIZE_START_POS,
+        safety_mode=cfg.SAFETY_MODE, safety_margin=cfg.SAFETY_MARGIN,
+        seed=cfg.SEED + 1000,  # a scenario not seen during training
     )
 
     net = ActorCritic(env.obs_dim, env.act_dim, cfg.HIDDEN_SIZE, cfg.LOG_STD_INIT).to(env.dev)
@@ -222,25 +231,43 @@ def plot_trajectory(checkpoint_path, out_path):
     print(f"Saved trajectory plot to {out_path}")
 
 
-def main():
-    args = parse_args()
-    if args.preset:
-        cfg.apply_preset(args.preset)
-    checkpoint_path = args.checkpoint or cfg.MODEL_SAVE_PATH
-    out_dir = args.out_dir or os.path.dirname(checkpoint_path) or "."
+def plot_checkpoint(checkpoint_path, out_dir=None, metrics_path=None, baselines=None):
+    out_dir = out_dir or os.path.dirname(checkpoint_path) or "."
     # Named after the checkpoint (matching scripts/train.py's metrics naming
     # and the plot filenames below), so plotting several checkpoints (e.g.
     # one per seed) in the same directory doesn't overwrite each other.
     checkpoint_base = os.path.splitext(os.path.basename(checkpoint_path))[0]
-    metrics_path = args.metrics or os.path.join(out_dir, f"{checkpoint_base}_metrics.csv")
+    metrics_path = metrics_path or os.path.join(out_dir, f"{checkpoint_base}_metrics.csv")
 
     plot_trajectory(checkpoint_path, os.path.join(out_dir, f"{checkpoint_base}_trajectory.png"))
     if os.path.exists(metrics_path):
-        baselines = compute_reference_baselines()
+        baselines = baselines or compute_reference_baselines()
         plot_training_curves(metrics_path, os.path.join(out_dir, f"{checkpoint_base}_training_curves.png"), baselines)
         plot_ppo_diagnostics(metrics_path, os.path.join(out_dir, f"{checkpoint_base}_ppo_diagnostics.png"))
     else:
         print(f"No metrics.csv found at {metrics_path}, skipping training curves / diagnostics.")
+    return baselines
+
+
+def main():
+    args = parse_args()
+    if args.run:
+        run_tracking.load_run_config(cfg, args.run)
+        seeds = args.seeds or run_tracking.read_run_info(args.run)["seeds"]
+        baselines = None  # same config for every seed -> compute once, reuse
+        for seed in seeds:
+            print(f"\n=== seed {seed} ===")
+            cfg.SEED = seed
+            checkpoint_path = os.path.join(run_tracking.seed_dir(args.run, seed), "model.pt")
+            if not os.path.exists(checkpoint_path):
+                print(f"No checkpoint at {checkpoint_path}, skipping (seed unfinished?)")
+                continue
+            baselines = plot_checkpoint(checkpoint_path, baselines=baselines)
+        return
+
+    if args.preset:
+        cfg.apply_preset(args.preset)
+    plot_checkpoint(args.checkpoint or cfg.MODEL_SAVE_PATH, args.out_dir, args.metrics)
 
 
 if __name__ == "__main__":

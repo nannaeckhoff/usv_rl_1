@@ -9,6 +9,7 @@
 #   3. A heuristic controller (turn to face the goal, then thrust) beats a
 #      random policy on Stage A, actually reaches goals, and costs exactly 0
 #      (no hazards on Stage A)
+#   4. Each safety mode gives the expected cost at known positions
 
 import sys
 import os
@@ -19,7 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import torch
 
 import config as cfg
-from environment import PointToGoal
+from environment import PointToGoal, SAFETY_MODES, compute_cost
 
 
 def _push_goal_far_away(env):
@@ -209,10 +210,44 @@ def check_heuristic_beats_random_on_stage_a():
     print("    OK")
 
 
+def check_safety_modes():
+    print("[4] safety modes: cost at known positions ...", end=" ")
+    r, margin = 0.5, 0.5
+    hazards = torch.zeros(4, 1, 2)  # one hazard at the origin
+    # Agent at: the center, halfway into the hazard, inside the margin
+    # (0.25 outside the edge), and well clear of hazard + margin.
+    pos = torch.tensor([[0.0, 0.0], [0.25, 0.0], [0.75, 0.0], [2.0, 0.0]])
+    toward = torch.tensor([[-1.0, 0.0]]).repeat(4, 1)  # moving at speed 1 toward the hazard
+    away = -toward
+    heading = torch.zeros(4)
+
+    def cost(mode, vel=toward):
+        return compute_cost(pos, vel, heading, hazards, r, mode, margin)
+
+    expected = {
+        "binary":      [1.0, 1.0, 0.0, 0.0],
+        "penetration": [1.0, 0.5, 0.0, 0.0],
+        "proximity":   [1.0, 0.75, 0.25, 0.0],  # 1 - d / (r + margin)
+        "velocity":    [0.0, 0.75, 0.25, 0.0],  # proximity * closing speed (0 at the center: no direction)
+    }
+    assert set(expected) == set(SAFETY_MODES), "every safety mode needs an expected value here"
+    for mode, values in expected.items():
+        got = cost(mode)
+        assert torch.allclose(got, torch.tensor(values), atol=1e-5), f"{mode}: expected {values}, got {got.tolist()}"
+    assert (cost("velocity", away) == 0).all(), "velocity: moving away from a hazard should cost nothing"
+
+    no_hazards = torch.zeros(4, 0, 2)
+    for mode in SAFETY_MODES:
+        assert (compute_cost(pos, toward, heading, no_hazards, r, mode, margin) == 0).all(), \
+            f"{mode}: no hazards must mean zero cost"
+    print("OK")
+
+
 if __name__ == "__main__":
     check_unicycle_straight_line()
     check_unicycle_circle()
     check_speed_clamp_and_braking()
     check_seeding_reproducible()
     check_heuristic_beats_random_on_stage_a()
+    check_safety_modes()
     print("\nAll checks passed.")

@@ -4,8 +4,10 @@
 # (baseline_seedN_metrics.csv) and plots mean +/- std across seeds for
 # reward, success rate, cost and violation rate, aligned on env_steps.
 #
-# Run: python scripts/plot_seeds.py --preset stage_b
-#      python scripts/plot_seeds.py --preset stage_b --seeds 1 2 3
+# Run: python scripts/plot_seeds.py --run results/runs/<run> [--seeds 1 2 3]
+#        seeds of one train.py run (its seed_<N>/ subfolders) -> <run>/seeds.png
+#      python scripts/plot_seeds.py --preset stage_b [--seeds 1 2 3]
+#        older runs saved as baseline_seedN_metrics.csv next to the checkpoint
 
 import argparse
 import csv
@@ -22,10 +24,12 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import config as cfg
+import run_tracking
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Plot mean +/- std training curves across several seed runs.")
+    p.add_argument("--run", type=str, default=None, help="a results/runs/<run> folder from scripts/train.py")
     p.add_argument("--preset", type=str, default=None, choices=list(cfg.PRESETS))
     p.add_argument("--seeds", type=int, nargs="+", default=None,
                     help="which seeds to include; default: autodetect all baseline_seed*_metrics.csv "
@@ -56,6 +60,17 @@ def find_seed_metrics(base_path, seeds):
     return seeds, paths
 
 
+def find_run_seed_metrics(run_dir, seeds):
+    """Metrics of each seed_<N>/ in a run folder (only seeds that have one)."""
+    if seeds is None:
+        seeds = run_tracking.read_run_info(run_dir)["seeds"]
+    found = [(s, os.path.join(run_tracking.seed_dir(run_dir, s), "model_metrics.csv")) for s in seeds]
+    found = [(s, p) for s, p in found if os.path.exists(p)]
+    if not found:
+        raise FileNotFoundError(f"No seed metrics found in {run_dir}")
+    return [s for s, _ in found], [p for _, p in found]
+
+
 def load_metrics(path):
     env_steps, reward, success, cost, violation = [], [], [], [], []
     with open(path, "r", newline="") as f:
@@ -71,10 +86,14 @@ def load_metrics(path):
 
 def main():
     args = parse_args()
-    if args.preset:
-        cfg.apply_preset(args.preset)
-
-    seeds, paths = find_seed_metrics(cfg.MODEL_SAVE_PATH, args.seeds)
+    if args.run:
+        seeds, paths = find_run_seed_metrics(args.run, args.seeds)
+        default_out = os.path.join(args.run, "seeds.png")
+    else:
+        if args.preset:
+            cfg.apply_preset(args.preset)
+        seeds, paths = find_seed_metrics(cfg.MODEL_SAVE_PATH, args.seeds)
+        default_out = os.path.join(os.path.dirname(cfg.MODEL_SAVE_PATH) or ".", "baseline_seeds.png")
     print(f"Found {len(paths)} seed run(s): {seeds}")
 
     runs = [load_metrics(p) for p in paths]
@@ -110,7 +129,7 @@ def main():
     axes[0].set_title(f"Across-seed training curves ({len(seeds)} seeds: {seeds})")
 
     fig.tight_layout()
-    out_path = args.out or os.path.join(os.path.dirname(cfg.MODEL_SAVE_PATH) or ".", "baseline_seeds.png")
+    out_path = args.out or default_out
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
     print(f"Saved seed-comparison plot to {out_path}")
