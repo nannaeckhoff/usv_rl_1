@@ -137,7 +137,7 @@ class PointToGoal:
     def __init__(self, N, dev="cuda", dt=0.1, horizon=1000,
                  k=1.0, c=0.5, w_max=1.0, v_max=None, thrust_mode="bidirectional", reverse_scale=1.0,
                  world_half_extent=5.0, goal_radius=0.3, goal_bonus=1.0,
-                 num_hazards=3, hazard_radius=0.5, placement_resample_rounds=10,
+                 num_hazards=3, hazard_radius=0.5, placement_resample_rounds=10, hazard_on_path_prob=0.0,
                  randomize_start_pos=False, safety_mode="penetration", safety_margin=0.5, seed=0):
         if dev == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("dev='cuda' requested but CUDA is not available -- "
@@ -148,6 +148,8 @@ class PointToGoal:
             raise ValueError(f"reverse_scale must be in [0, 1], got {reverse_scale}")
         if safety_mode not in SAFETY_MODES:
             raise ValueError(f"safety_mode must be one of {SAFETY_MODES}, got {safety_mode!r}")
+        if not 0.0 <= hazard_on_path_prob <= 1.0:
+            raise ValueError(f"hazard_on_path_prob must be in [0, 1], got {hazard_on_path_prob}")
         if safety_margin < 0:
             raise ValueError(f"safety_margin must be >= 0, got {safety_margin}")
         # Euler stability of the drag term: v <- (1 - c*dt) v + ... must keep
@@ -174,6 +176,7 @@ class PointToGoal:
         self.H = num_hazards
         self.hazard_radius = hazard_radius
         self.placement_resample_rounds = placement_resample_rounds
+        self.hazard_on_path_prob = hazard_on_path_prob
         self.randomize_start_pos = randomize_start_pos
         self.safety_mode = safety_mode
         self.safety_margin = safety_margin
@@ -227,6 +230,32 @@ class PointToGoal:
             point = torch.where(bad.unsqueeze(-1), self._sample_positions(shape), point)
         return point
 
+    def _place_hazard_on_path(self, start, goal, hazards):
+        """With probability hazard_on_path_prob, move one randomly chosen
+        hazard onto the straight line from start to goal: 30-70% of the way
+        along it, shifted sideways by at most hazard_radius, so driving
+        straight at the goal always goes through it. Independently placed
+        hazards almost never block the path (~2% of episodes with one
+        hazard), so without this the agent hardly ever has to avoid one.
+        Where the spot would be too close to start or goal (short paths),
+        the hazard keeps its random position."""
+        if self.H == 0 or self.hazard_on_path_prob == 0.0:
+            return hazards  # no extra random draws -> scenarios identical to before this existed
+        N = self.N
+        d = goal - start
+        length = d.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        normal = torch.stack([-d[:, 1], d[:, 0]], dim=-1) / length
+        along = self._rand_uniform((N, 1), 0.3, 0.7)
+        sideways = self._rand_uniform((N, 1), -self.hazard_radius, self.hazard_radius)
+        spot = start + along * d + sideways * normal  # (N, 2)
+
+        keepout = self.hazard_radius + self.goal_radius
+        clear = ((spot - start).norm(dim=-1) >= keepout) & ((spot - goal).norm(dim=-1) >= keepout)
+        use = clear & (self._rand_uniform((N,), 0.0, 1.0) < self.hazard_on_path_prob)
+        which = torch.randint(self.H, (N,), generator=self.gen, device=self.dev)
+        move = use.unsqueeze(-1) & (torch.arange(self.H, device=self.dev) == which.unsqueeze(-1))  # (N, H)
+        return torch.where(move.unsqueeze(-1), spot.unsqueeze(1), hazards)
+
     def reset(self):
         N, dev = self.N, self.dev
         self.hazards = self._place_hazards()
@@ -234,6 +263,7 @@ class PointToGoal:
         self.v = torch.zeros(N, device=dev)
         self.th = self._rand_uniform((N,), -math.pi, math.pi)  # random initial heading
         self.goal = self._place_clear_point(self.hazards)
+        self.hazards = self._place_hazard_on_path(self.pos, self.goal, self.hazards)
         self.last_dist = (self.goal - self.pos).norm(dim=-1)
         self.t = torch.zeros(N, dtype=torch.long, device=dev)
         return self._obs()
@@ -313,6 +343,8 @@ class PointToGoal:
         self.v = torch.where(done, torch.zeros_like(self.v), self.v)
         self.th = torch.where(done, self._rand_uniform((self.N,), -math.pi, math.pi), self.th)
         self.goal = torch.where(done2, self._place_clear_point(self.hazards), self.goal)
+        new_hazards = self._place_hazard_on_path(self.pos, self.goal, self.hazards)
+        self.hazards = torch.where(done.view(-1, 1, 1), new_hazards, self.hazards)
         self.last_dist = (self.goal - self.pos).norm(dim=-1)
         self.t = torch.where(done, torch.zeros_like(self.t), self.t)
 

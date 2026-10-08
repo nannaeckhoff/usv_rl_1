@@ -118,7 +118,7 @@ def _build_env(seed=cfg.SEED):
         reverse_scale=cfg.REVERSE_THRUST_SCALE,
         world_half_extent=cfg.WORLD_HALF_EXTENT, goal_radius=cfg.GOAL_RADIUS, goal_bonus=cfg.GOAL_BONUS,
         num_hazards=cfg.NUM_HAZARDS, hazard_radius=cfg.HAZARD_RADIUS,
-        placement_resample_rounds=cfg.PLACEMENT_RESAMPLE_ROUNDS,
+        placement_resample_rounds=cfg.PLACEMENT_RESAMPLE_ROUNDS, hazard_on_path_prob=cfg.HAZARD_ON_PATH_PROB,
         randomize_start_pos=cfg.RANDOMIZE_START_POS,
         safety_mode=cfg.SAFETY_MODE, safety_margin=cfg.SAFETY_MARGIN, seed=seed,
     )

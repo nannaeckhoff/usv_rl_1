@@ -10,6 +10,8 @@
 #      random policy on Stage A, actually reaches goals, and costs exactly 0
 #      (no hazards on Stage A)
 #   4. Each safety mode gives the expected cost at known positions
+#   5. hazard_on_path_prob puts a hazard on the start->goal line, clear of
+#      start and goal
 
 import sys
 import os
@@ -263,6 +265,39 @@ def check_safety_modes():
     print("OK")
 
 
+def _path_blocked(env):
+    """Per env: does the straight start->goal line pass through a hazard?"""
+    s, g, hz = env.pos, env.goal, env.hazards
+    d = g - s
+    along = (((hz - s.unsqueeze(1)) * d.unsqueeze(1)).sum(-1) / d.pow(2).sum(-1, keepdim=True)).clamp(0, 1)
+    closest = s.unsqueeze(1) + along.unsqueeze(-1) * d.unsqueeze(1)
+    return ((hz - closest).norm(dim=-1) < env.hazard_radius).any(dim=1)
+
+
+def check_hazard_on_path():
+    print("[5] hazard on path: blocks the straight line, start/goal stay clear ...", end=" ")
+    N = 20000
+    keepout = 0.5 + 0.3  # hazard_radius + goal_radius (defaults)
+    blocked = {}
+    for prob in (0.0, 0.7, 1.0):
+        env = PointToGoal(N=N, dev="cpu", num_hazards=1, hazard_on_path_prob=prob, seed=7)
+        env.reset()
+        blocked[prob] = _path_blocked(env).float().mean().item()
+        assert ((env.hazards - env.pos.unsqueeze(1)).norm(dim=-1) >= keepout - 1e-5).all(), "hazard too close to start"
+        assert ((env.hazards - env.goal.unsqueeze(1)).norm(dim=-1) >= keepout - 1e-5).all(), "hazard too close to goal"
+    print(f"(blocked: {blocked[0.0]:.0%} / {blocked[0.7]:.0%} / {blocked[1.0]:.0%} at prob 0 / 0.7 / 1) ", end="")
+    assert blocked[0.0] < 0.1, "fully random placement should rarely block the path"
+    assert blocked[1.0] > 0.6, "prob 1 should block the path in most episodes (all but short paths)"
+    assert blocked[0.0] < blocked[0.7] < blocked[1.0]
+
+    # Also after auto-resets inside step(), not only after reset().
+    env = PointToGoal(N=N, dev="cpu", num_hazards=1, hazard_on_path_prob=1.0, horizon=1, seed=8)
+    env.reset()
+    env.step(torch.zeros(N, 2))  # horizon=1 -> every env is reset here
+    assert _path_blocked(env).float().mean().item() > 0.6, "on-path placement missing after auto-reset"
+    print("OK")
+
+
 if __name__ == "__main__":
     check_unicycle_straight_line()
     check_unicycle_circle()
@@ -270,4 +305,5 @@ if __name__ == "__main__":
     check_seeding_reproducible()
     check_heuristic_beats_random_on_stage_a()
     check_safety_modes()
+    check_hazard_on_path()
     print("\nAll checks passed.")

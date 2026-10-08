@@ -48,6 +48,11 @@ RANDOMIZE_START_POS = False  # False: always start at the origin. True: random, 
 NUM_HAZARDS = 3
 HAZARD_RADIUS = 0.5
 PLACEMENT_RESAMPLE_ROUNDS = 10  # how hard to try placing goal/hazards clear of each other
+# Share of episodes where one hazard is put on the straight line from start
+# to goal, so the agent actually has to go around it. Randomly placed
+# hazards alone block the path in only ~2% of episodes (1 hazard).
+# 0.0 = fully random placement, as in runs before this setting existed.
+HAZARD_ON_PATH_PROB = 0.7
 
 # --- Safety representation ---
 # Which cost formula the environment uses (see environment.SAFETY_MODES):

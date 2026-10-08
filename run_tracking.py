@@ -74,6 +74,7 @@ def apply_overrides(cfg, assignments):
 # today's config.py default would be wrong for them.
 PRE_EXISTING_DEFAULTS = {
     "REVERSE_THRUST_SCALE": 1.0,  # thrust used to be symmetric
+    "HAZARD_ON_PATH_PROB": 0.0,   # hazards used to be placed fully at random
 }
 
 
