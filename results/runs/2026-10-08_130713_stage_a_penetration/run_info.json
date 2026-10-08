@@ -1,0 +1,18 @@
+{
+  "run_id": "2026-10-08_130713_stage_a_penetration",
+  "started": "2026-10-08T13:07:13",
+  "command": "python scripts/train.py --preset stage_a --seeds 1 2 3 4 5 --note \"first GPU run\"",
+  "note": "first GPU run",
+  "preset": "stage_a",
+  "seeds": [
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "overrides": {},
+  "commit": "58c1296ae6871a318c72d88d9aeebf1c5c4780c4",
+  "branch": "main",
+  "dirty": false
+}
