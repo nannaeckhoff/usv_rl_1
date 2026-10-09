@@ -102,14 +102,34 @@ shorter budget makes every later sweep about 3× cheaper. The LR is annealed
 over `TOTAL_UPDATES`, so the budget changes the LR schedule too. That is why
 it is fixed first and then held constant.
 
-| Run | Command (Stage A, seeds 1 2 3) |
-|---|---|
-| B150 | `--set TOTAL_UPDATES=150 --name upd150` |
-| B250 | `--set TOTAL_UPDATES=250 --name upd250` |
+**Run** (GPU machine, about 30 min in total):
 
-**Pick** the smallest budget whose `ep_len` and `success%` match A0 within
-the seed std. This is probably 150–250. It is called **N** below, and every
-run after this uses `TOTAL_UPDATES=N`. About 3–5 min per seed.
+```
+python scripts/train.py --preset stage_a --seeds 1 2 3 4 5 --set LAMBDA_COST=0 TOTAL_UPDATES=150 --name upd150 --note "Phase 2: budget 150"
+python scripts/evaluate.py --run "$(ls -td results/runs/*/ | head -1)"
+python scripts/train.py --preset stage_a --seeds 1 2 3 4 5 --set LAMBDA_COST=0 TOTAL_UPDATES=250 --name upd250 --note "Phase 2: budget 250"
+python scripts/evaluate.py --run "$(ls -td results/runs/*/ | head -1)"
+python scripts/sync_results.py
+```
+
+**Compare** (own computer), with all three budgets in one table:
+
+```
+git pull
+python scripts/plot_eval.py --run results/runs/2026-10-08_142709_stage_a_penetration results/runs/<..._upd150> results/runs/<..._upd250>
+```
+
+**Pick** the smallest budget where all of these hold:
+
+- `success%` ≥ 99;
+- `ep_len` is within A0's seed std (38.4 ± 0.9);
+- the seed std of `ep_len` is no larger than A0's.
+
+The last point matters because a shorter budget also anneals the LR to 0
+faster, so exploration stops sooner, which can increase the seed spread.
+
+If neither 150 nor 250 passes, keep 500. The chosen value is called **N**
+below, and every run after this uses `TOTAL_UPDATES=N`.
 
 ## Phase 3: One parameter at a time (Stage A, seeds 1–5, `TOTAL_UPDATES=N`)
 
