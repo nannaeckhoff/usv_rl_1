@@ -101,7 +101,7 @@ def print_checks(rows, stats):
         ("... also when a hazard blocks the straight path",  # nan = no hazards (Stage A)
          all(np.isnan(r["succ_blk%"]) or r["succ_blk%"] >= 99 for r in seeds.values())),
         ("faster than the heuristic (median len/heur < 1)", stats["len/heur"][0] < 1.0),
-        ("seeds agree: episode-length std < 5% of mean", stats["ep_len"][1] < 0.05 * stats["ep_len"][0]),
+        ("seeds agree: episode-length std < 2% of mean", stats["ep_len"][1] < 0.02 * stats["ep_len"][0]),
         ("stable updates: approx KL < 0.02 after update 10", all(r["max_kl"] < 0.02 for r in seeds.values())),
     ]
     print("\nChecks:")

@@ -42,7 +42,7 @@ GPU machine):
 
 ```
 for lr in 1e-4 1e-3 3e-3; do
-  python scripts/train.py --preset stage_a --seeds 1 2 3 --set TOTAL_UPDATES=<N> LR=$lr --name lr$lr --note "tuning: LR=$lr"
+  python scripts/train.py --preset stage_a --seeds 1 2 3 4 5 --set TOTAL_UPDATES=<N> LR=$lr --name lr$lr --note "tuning: LR=$lr"
   python scripts/evaluate.py --run "$(ls -td results/runs/*/ | head -1)"
 done
 python scripts/sync_results.py
@@ -54,12 +54,14 @@ Read in this order from the `plot_eval.py` table:
 
 1. `success%`: must stay ≥ 99% for every seed. A setting that drops it is
    rejected, whatever else it improves.
-2. `ep_len` and `len/heur`: episode length on the same 10,000 scenarios. Lower
+2. Seed std of `ep_len`: how much the result depends on the seed. Target
+   below 2% of the mean, which is what the "seeds agree" check tests. This
+   is the main tuning goal (see Phase 1). Later safety effects are only a
+   few percent, so a seed spread of the same size would hide them.
+3. `ep_len` and `len/heur`: episode length on the same 10,000 scenarios. Lower
    means a better policy, i.e. faster to the goal.
-3. `conv_upd`: the update at which reward reaches 95% of its final value.
+4. `conv_upd`: the update at which reward reaches 95% of its final value.
    Lower means it learns faster.
-4. Seed std of the above: lower means more robust. The "seeds agree" check
-   must pass.
 5. PPO health in `seeds_training.png`: approx KL < 0.02, entropy falls
    gradually rather than dropping in a few updates, and the value loss goes
    down.
@@ -78,8 +80,20 @@ whose Stage A behaviour is unchanged since then.
 python scripts/evaluate.py --run results/runs/2026-10-08_142709_stage_a_penetration
 ```
 
-Expected, based on a quick evaluation with 1,000 episodes: success 100%,
-`ep_len` ≈ 38.6, `len/heur` ≈ 0.79, `conv_upd` ≈ 76 ± 12, and all checks OK.
+Result (10,000 episodes): success 99.99%, `ep_len` 38.4 ± 0.9, `len/heur`
+0.79, `conv_upd` 76 ± 12, and PPO health is fine.
+
+- The only failures are 6 episodes from seed 1. In all of them the goal starts
+  just outside the goal radius (0.33–0.48 m away), and the boat circles until
+  it times out. This is a rare edge case, not a tuning problem.
+- **Seed spread is too large:** `ep_len` runs from 37.3 (seed 3) to 39.9
+  (seed 2), about 7% apart, with a std of 2.4% of the mean. The "seeds
+  agree" check fails.
+- The training curves show why. Each seed settles at its own reward level
+  within about 1e8 steps and never catches up. Entropy falls to about −2.9
+  and the LR anneals to 0, so every seed freezes in its own way of solving
+  the task.
+- That points to exploration and step size, which is what Phase 3 targets.
 
 ## Phase 2: Training budget (`TOTAL_UPDATES`)
 
@@ -97,18 +111,23 @@ it is fixed first and then held constant.
 the seed std. This is probably 150–250. It is called **N** below, and every
 run after this uses `TOTAL_UPDATES=N`. About 3–5 min per seed.
 
-## Phase 3: One parameter at a time (Stage A, seeds 1 2 3, `TOTAL_UPDATES=N`)
+## Phase 3: One parameter at a time (Stage A, seeds 1–5, `TOTAL_UPDATES=N`)
 
 The reference for this phase is the Phase 2 winner. Change one parameter per
 run and keep everything else at the reference.
 
+The main goal is to cut the seed spread found in Phase 1, without making
+`ep_len` or `conv_upd` worse. Use 5 seeds here, not 3: an std computed from 3
+seeds is too noisy to tell whether the spread really went down. The steps
+most likely to help are 3b and 3e (exploration) and 3a (step size).
+
 | Step | Parameter | Values to try (ref. **bold**) | What to look for |
 |---|---|---|---|
-| 3a | `LR` | 1e-4, **3e-4**, 1e-3, 3e-3 | KL is only ~0.003, so larger steps are probably safe. Look for lower `conv_upd` with no loss in `ep_len`. Reject if KL > 0.02 or seeds start to disagree. |
-| 3b | `ENTROPY_COEF` | **0**, 0.001, 0.005 | Entropy falls to about −3, so the policy becomes nearly deterministic. A small bonus keeps exploration alive, which matters once a cost appears. Accept if `ep_len` is unchanged; it also helps Phase 6. |
+| 3a | `LR` | 1e-4, **3e-4**, 1e-3, 3e-3 | KL is only ~0.003, so larger steps are probably safe. Look for lower `conv_upd` and lower seed std, with no loss in `ep_len`. Reject if KL > 0.02. |
+| 3b | `ENTROPY_COEF` | **0**, 0.001, 0.005 | Entropy falls to about −3, so the policy becomes nearly deterministic and each seed stays where it first lands. A small bonus keeps exploration alive for longer. Look for lower seed std. This also matters once a cost appears in Phase 6. |
 | 3c | `NUM_MINIBATCHES` | **8**, 32 | More gradient steps per batch, since a minibatch is currently ~100k samples. Look for lower `conv_upd`, and watch KL and clip fraction. |
 | 3d | `EPOCHS` | 5, **10** | Only if 3c changed something: fewer passes means faster and more stable updates. |
-| 3e | `LOG_STD_INIT` | −1.0, **−0.5**, 0.0 | Initial exploration noise. Look for lower `conv_upd`, and success should not dip early on. |
+| 3e | `LOG_STD_INIT` | −1.0, **−0.5**, 0.0 | Initial exploration noise. More noise early on can stop seeds from locking in too soon. Look for lower seed std and lower `conv_upd`. Success should not dip early on. |
 
 Not tuned, because the diagnostics show nothing wrong and the cleanRL defaults
 are a defensible choice: `CLIP_EPS` 0.2, `GAE_LAMBDA` 0.95, `VF_COEF` 0.5,
@@ -117,18 +136,27 @@ are a defensible choice: `CLIP_EPS` 0.2, `GAE_LAMBDA` 0.95, `VF_COEF` 0.5,
 definition (how much speed is rewarded) rather than a learning setting, and
 changing it changes what "optimal" means.
 
-Each step reuses the winners of the steps before it. About 11 runs × 3 seeds
-× 3–5 min ≈ 2–3 hours of GPU time in total.
+Each step reuses the winners of the steps before it. About 11 runs × 5 seeds
+× 3–5 min ≈ 3–4.5 hours of GPU time in total.
 
 ## Phase 4: Confirm the tuned setup (Stage A, seeds 1–5)
 
 ```
-python scripts/train.py --preset stage_a --seeds 1 2 3 4 5 --set TOTAL_UPDATES=N <winners> --name tuned --note "tuned PPO, Stage A"
+python scripts/train.py --preset stage_a --seeds 6 7 8 9 10 --set TOTAL_UPDATES=N <winners> --name tuned --note "tuned PPO, Stage A, fresh seeds"
 ```
+
+These are new seeds. The winners were picked on seeds 1–5, so a low spread
+there could partly be luck. It only counts if it also holds on seeds the
+tuning never saw.
 
 Compare with A0 using `plot_eval.py --run <A0> <tuned>`. All checks must be
 OK. Then write the winners into `config.py` as the new defaults and commit
 them ("Tuned PPO defaults"), so every later run uses them without `--set`.
+
+If the seed std is still above 2%, accept it, but use 10 seeds instead of 5
+in Phases 5 and 6, and in every later safety comparison. More seeds give a
+more precise mean (its uncertainty shrinks with √n), so small safety effects
+can still be told apart from seed noise.
 
 ## Phase 5: Stage B without cost (λ = 0, seeds 1–5)
 
@@ -184,6 +212,6 @@ Fill in after each `plot_eval.py`, using mean ± std over seeds.
 | 3d | | EPOCHS=5 | | | | | – | |
 | 3e | | LOG_STD_INIT=-1.0 | | | | | – | |
 | 3e | | LOG_STD_INIT=0.0 | | | | | – | |
-| 4 | | tuned, 5 seeds | | | | | – | |
+| 4 | | tuned, seeds 6–10 | | | | | – | |
 | 5 | | Stage B, λ=0 | | | | | | |
 | 6 | | Stage B, binary, λ=1 | | | | | | |
